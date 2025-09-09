@@ -10,4 +10,6 @@ public interface LlmServiceImpl {
      * @return text trả lời
      */
     String generate(String system, String user, double temperature, Integer maxOutputTokens);
+
+    String generate(String system, String user);
 }

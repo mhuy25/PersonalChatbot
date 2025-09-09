@@ -3,14 +3,19 @@ package com.example.personalchatbot.controller;
 import com.example.personalchatbot.config.LlmConfig;
 import com.example.personalchatbot.dto.AnswerDto;
 import com.example.personalchatbot.dto.MetadataDto;
+import com.example.personalchatbot.service.sql.dto.SqlChunkDto;
 import com.example.personalchatbot.dto.request.MessageRequest;
+import com.example.personalchatbot.service.sql.dialect.service.DialectDetectService;
+import com.example.personalchatbot.service.sql.druid.service.SqlChunkService;
 import com.example.personalchatbot.service.metadata.MetadataService;
 import com.example.personalchatbot.service.rag.RagService;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -20,6 +25,8 @@ import java.util.Map;
 @RequestMapping("/api/")
 public class ChatbotController {
     private final MetadataService metadataService;
+    private final SqlChunkService sqlChunkService;
+    private final DialectDetectService dialectDetectService;
     private final RagService ragService;
     private final LlmConfig llmConfig;
 
@@ -48,6 +55,31 @@ public class ChatbotController {
         } catch (Exception e) {
             log.error("Message xử lý lỗi: ", e);
             return ResponseEntity.internalServerError().body(e.getMessage());
+        }
+    }
+
+    @PostMapping("/sqlchunk")
+    public List<SqlChunkDto> onSqlChunk(@RequestBody String  sql, HttpServletResponse response) {
+        try {
+            if (sql == null || sql.trim().isEmpty()) {
+                response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+                return null;
+            }
+            else {
+                /*DialectDetectDto dialect = dialectDetectService.detect(sql);
+                if (dialect == null || dialect.getDbType() == null || dialect.getDbType().isEmpty() || dialect.getDbType().equals(String.valueOf(DbType.other))) {
+                    return ResponseEntity.internalServerError().body("Không tìm thấy dialect phù hợp!");
+                }
+                else {
+                    return ResponseEntity.ok().body(sqlChunkService.chunk(sql, dialect.getDbType()).toString());
+                }*/
+                response.setStatus(HttpServletResponse.SC_OK);
+                return sqlChunkService.chunk(sql, "postgresql");
+            }
+        } catch (Exception e) {
+            log.error("Message xử lý lỗi: ", e);
+            response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+            return null;
         }
     }
 }
