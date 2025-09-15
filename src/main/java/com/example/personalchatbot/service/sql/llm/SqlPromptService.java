@@ -1,72 +1,46 @@
 package com.example.personalchatbot.service.sql.llm;
 
 import com.example.personalchatbot.dto.PromptDto;
-import com.example.personalchatbot.dto.SearchHitDto;
-import com.example.personalchatbot.service.implement.PromptServiceImpl;
+import com.example.personalchatbot.service.sql.llm.implement.SqlPromptServiceImpl;
 import org.springframework.stereotype.Service;
 
-import java.util.List;
-
 @Service
-public class SqlPromptService implements PromptServiceImpl {
+public class SqlPromptService implements SqlPromptServiceImpl {
 
     @Override
-    public PromptDto build(String question, List<SearchHitDto> hits) {
+    public PromptDto build(String question, String dialect) {
+        final String d = norm(dialect);
 
-        String system = String.join("\n",
-                "You are a SQL metadata extractor.",
-                "",
-                "TASK",
-                "- Read a SQL DIALECT and a list of SQL statements.",
-                "- Return a JSON ARRAY with one object per input statement in the same order.",
-                "- Output JSON only (no prose, no markdown, no comments).",
-                "",
-                "OUTPUT SCHEMA (per item)",
-                "{",
-                "  \"statementType\": \"CREATE_SCHEMA | CREATE_TABLE | CREATE_VIEW | CREATE_INDEX | CREATE_TRIGGER | CREATE_FUNCTION | CREATE_PROCEDURE | STATEMENT\",",
-                "  \"schemaName\": string|null,",
-                "  \"objectName\": string|null,",
-                "  \"tables\": string[],",
-                "  \"columns\": string[]",
-                "}",
-                "",
-                "STRICT RULES",
-                "1) JSON array only. Number of items MUST equal number of input statements. Keep order.",
-                "2) Keep identifiers EXACTLY as written but strip quoting wrappers (\"name\", [name], `name` -> name). Preserve original case.",
-                "3) schemaName/objectName:",
-                "   - If the defined object is schema-qualified (e.g., sample.orders): schemaName=\"sample\", objectName=\"orders\".",
-                "   - If not qualified: schemaName=null, objectName=unqualified name.",
-                "   - For generic STATEMENTs, objectName=null.",
-                "4) CREATE_SCHEMA: objectName=schema; tables=[]; columns=[].",
-                "5) CREATE_TABLE: objectName=table; tables=[table]; columns=all defined column names (exclude constraints, indexes, expressions, computed columns).",
-                "6) CREATE_VIEW: objectName=view; tables = dedup base tables from the SELECT (FROM/JOIN; include CTE base tables);",
-                "   columns = output columns (use SELECT aliases; if any wildcard *, set []).",
-                "7) CREATE_INDEX: objectName=index; tables=[base table]; columns=index key columns in order; omit expression keys (e.g., LOWER(name)).",
-                "8) CREATE_TRIGGER: objectName=trigger; tables=[target table in ON <table>];",
-                "   columns = columns listed in UPDATE OF ... plus columns referenced in WHEN(...); if none/unclear, [].",
-                "9) CREATE_FUNCTION / CREATE_PROCEDURE:",
-                "   - objectName=routine name (set schemaName if qualified).",
-                "   - Parse dollar-quoted bodies $$...$$ as code, not plain text.",
-                "   - Extract SQL statements inside (SELECT/INSERT/UPDATE/DELETE/MERGE/EXECUTE).",
-                "   - tables = dedup base tables referenced by those SQL statements.",
-                "   - columns = distinct referenced column names from those SQL statements.",
-                "   - Ignore variables/params/records (NEW./OLD., p_*, v_*).",
-                "10) STATEMENT (all others): objectName=null; tables=dedup base tables; columns=distinct referenced columns; if only * or unclear, [].",
-                "11) Deduplicate lists but keep first-seen order. Limit columns to 100 items.",
-                "12) If a statement cannot be confidently parsed, return {\"statementType\":\"STATEMENT\",\"schemaName\":null,\"objectName\":null,\"tables\":[],\"columns\":[]}."
-        );
+        // System prompt: yêu cầu vai trò, output JSON tối giản và kiên định.
+        String system =
+                "Bạn là chuyên gia phân tích SQL đa dialect (MySQL, PostgreSQL, ...). " +
+                        "Nhiệm vụ: nhận MỘT câu SQL và trả về metadata ở dạng JSON THUẦN, không thêm lời giải thích. " +
+                        "Nếu không chắc kiểu câu lệnh, trả về \"statementType\":\"RAW_STATEMENT\" nhưng vẫn cố gắng liệt kê bảng/cột. " +
+                        "Quy ước JSON:\n" +
+                        "{\n" +
+                        "  \"statementType\": string,               // ví dụ: SELECT / INSERT / UPDATE / DELETE / CREATE_TABLE / CREATE_INDEX / CREATE_VIEW / CREATE_FUNCTION / CREATE_PROCEDURE / CREATE_TRIGGER / CREATE_EVENT / RAW_STATEMENT\n" +
+                        "  \"schemaName\": string|null,\n" +
+                        "  \"objectName\": string|null,             // tên bảng/view/index/hàm/thủ tục/trigger/event nếu có\n" +
+                        "  \"tables\": string[] ,                   // danh sách bảng có liên quan (kể cả alias được quy chiếu về tên bảng thật nếu suy được)\n" +
+                        "  \"columns\": string[]                    // danh sách cột (ưu tiên định dạng table.column nếu xác định được)\n" +
+                        "}\n" +
+                        "YÊU CẦU:\n" +
+                        "- Không in thêm text ngoài JSON. Không chú thích, không markdown.\n" +
+                        "- Tôn trọng dialect; với MySQL có thể gặp DELIMITER, nhưng đầu vào ở đây luôn là 01 statement đã được tách.\n" +
+                        "- Với CREATE INDEX/VIEW: suy ra bảng đích nếu thấy cú pháp ON <table> hoặc trong SELECT của VIEW.\n" +
+                        "- Với routine (FUNCTION/PROCEDURE/ TRIGGER/EVENT): statementType phải là CREATE_FUNCTION/CREATE_PROCEDURE/CREATE_TRIGGER/CREATE_EVENT; " +
+                        "  objectName là tên routine/trigger/event; tables/columns lấy trong phần thân nếu có thể (nếu không, để rỗng).";
 
-        String user = """
-            // Provide DIALECT and numbered STATEMENTS.
-            // Return ONLY a JSON array. No markdown. No explanations.
-
-            INPUT:
-            %s
-
-            OUTPUT:
-            [ ... JSON array only ... ]
-            """.formatted(question == null ? "" : question.trim());
+        // User prompt: truyền dialect + SQL
+        String user =
+                "Dialect: " + (d == null ? "unknown" : d) + "\n" +
+                        "SQL:\n" +
+                        question;
 
         return new PromptDto(system, user);
+    }
+
+    private static String norm(String d) {
+        return d == null ? null : d.trim().toLowerCase();
     }
 }

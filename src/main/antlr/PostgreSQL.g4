@@ -394,8 +394,11 @@ INTEGER      : [0-9]+ ;
 DECIMAL      : [0-9]+ '.' [0-9]+ ;
 STRING       : '\'' ( ~['\\] | '\\' . )* '\'' ;
 
-// Dollar-quoted body: $$ … $$
-DOLLAR_BLOCK : '$$' ( . | '\r' | '\n' )*? '$$' ;
+// Dollar-quoted body: hỗ trợ cả $$…$$ và $tag$…$tag$
+DOLLAR_BLOCK
+    : '$$' ( . | '\r' | '\n' )*? '$$'
+    | '$' [a-zA-Z_][a-zA-Z_0-9$]* '$' ( . | '\r' | '\n' )*? '$' [a-zA-Z_][a-zA-Z_0-9$]* '$'
+    ;
 
 WS           : [ \t\r\n]+ -> skip ;
 LINE_COMMENT : '--' ~[\r\n]* -> skip ;

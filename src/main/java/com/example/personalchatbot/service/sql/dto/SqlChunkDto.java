@@ -10,14 +10,19 @@ import lombok.experimental.FieldDefaults;
 @AllArgsConstructor
 @FieldDefaults(level = AccessLevel.PRIVATE)
 public class SqlChunkDto {
-    int index;                 // vị trí trong toàn bộ kết quả (0-based)
-    int part;                  // phần thứ m (1-based) của một statement (nếu có chia nhỏ)
-    int totalParts;            // tổng phần của statement đó
-    String dialect;            // ví dụ: "postgresql" / "oracle" / ...
-    String kind;               // CREATE_TABLE / FUNCTION_SIG / FUNCTION_BODY / PROCEDURE_SIG / ...
-    String schemaName;         // schema (nếu xác định được)
-    String objectName;         // tên object (bảng/hàm/thủ tục)
-    String content;            // nội dung chunk (đã cắt ≤ 300 tokens)
-    String metadataJson;       // metadata dạng JSON (tables/columns/relationships/…)
-    int tokenCount;            // số token của content
+
+    private int index;       // vị trí trong toàn bộ script
+    private int part;        // dùng khi câu bị chia nhiều phần (body routine)
+    private int totalParts;  // tổng số phần
+    private String dialect;  // tên DbType normalize (vd: "mysql", "postgresql")
+    private String kind;     // CREATE_TABLE / CREATE_INDEX / STATEMENT / RAW_STATEMENT ...
+    private String schemaName;
+    private String objectName;
+    private String content;  // nội dung câu
+
+    // giữ metadata dạng object (để service set vào: c.setMetadata(md))
+    private MetadataDto metadata;
+
+    // nếu cần đính kèm JSON metadata phụ (ví dụ meta của từng statement trong body routine)
+    private String metadataJson;
 }

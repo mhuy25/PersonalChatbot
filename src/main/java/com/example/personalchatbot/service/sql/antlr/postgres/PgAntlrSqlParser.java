@@ -1,342 +1,227 @@
 package com.example.personalchatbot.service.sql.antlr.postgres;
 
 import com.example.personalchatbot.service.sql.dto.MetadataDto;
+import com.example.personalchatbot.service.sql.dto.SqlChunkDto;
 import org.antlr.v4.runtime.*;
 import com.example.personalchatbot.service.sql.antlr.implement.AntlrSqlParserImpl;
 import com.example.personalchatbot.service.sql.antlr.postgres.PostgreSQLLexer;
 import com.example.personalchatbot.service.sql.antlr.postgres.PostgreSQLParser;
 import com.example.personalchatbot.service.sql.antlr.postgres.PostgreSQLBaseVisitor;
-import org.antlr.v4.runtime.tree.ParseTree;
-import org.antlr.v4.runtime.tree.TerminalNode;
+import org.springframework.stereotype.Component;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Locale;
+import java.util.*;
 
+@Component
 public class PgAntlrSqlParser implements AntlrSqlParserImpl {
-    // ---------------------------------------------------------------------
-    // Public API
-    // ---------------------------------------------------------------------
 
     @Override
-    public List<String> splitStatements(String sql) {
-        if (sql == null || sql.isBlank()) return List.of();
+    public String dialect() {
+        return "postgresql";
+    }
 
-        List<String> out = new ArrayList<>();
-        StringBuilder cur = new StringBuilder();
+    @Override
+    public List<SqlChunkDto> split(String sql) {
+        if (sql == null || sql.trim().isEmpty()) return List.of();
 
-        boolean inSingle = false;      // '...'
-        boolean inDollar = false;      // $$...$$
-        boolean inLineCmt = false;     // -- ...
-        boolean inBlockCmt = false;    // /* ... */
+        CharStream input = CharStreams.fromString(sql);
+        PostgreSQLLexer lexer = new PostgreSQLLexer(input);
 
-        for (int i = 0; i < sql.length(); i++) {
-            char c = sql.charAt(i);
+        List<SqlChunkDto> out = new ArrayList<>();
+        int partStart = 0;
+        int idx = 0;
 
-            // đang trong comment dòng
-            if (inLineCmt) {
-                cur.append(c);
-                if (c == '\n' || c == '\r') inLineCmt = false;
-                continue;
-            }
-            // đang trong comment block
-            if (inBlockCmt) {
-                cur.append(c);
-                if (c == '*' && i + 1 < sql.length() && sql.charAt(i + 1) == '/') {
-                    cur.append('/');
-                    i++;
-                    inBlockCmt = false;
+        while (true) {
+            Token t = lexer.nextToken();
+            if (t == null) break;
+
+            if (t.getType() == Token.EOF) {
+                if (t.getStartIndex() >= 0) {
+                    String chunk = slice(sql, partStart, sql.length()).trim();
+                    if (!chunk.isEmpty()) out.add(buildChunk(idx++, chunk));
                 }
-                continue;
-            }
-            // đang trong dollar-quoted body
-            if (inDollar) {
-                cur.append(c);
-                if (c == '$' && i + 1 < sql.length() && sql.charAt(i + 1) == '$') {
-                    cur.append('$');
-                    i++;
-                    inDollar = false;
-                }
-                continue;
-            }
-            // đang trong single-quoted string
-            if (inSingle) {
-                cur.append(c);
-                if (c == '\'') {
-                    // Postgres escape '' -> bước qua ký tự thứ hai
-                    if (i + 1 < sql.length() && sql.charAt(i + 1) == '\'') {
-                        cur.append('\'');
-                        i++;
-                    } else {
-                        inSingle = false;
-                    }
-                }
-                continue;
+                break;
             }
 
-            // ngoài mọi cấu trúc đặc biệt
-            if (c == '-' && i + 1 < sql.length() && sql.charAt(i + 1) == '-') {
-                cur.append("--");
-                i++;
-                inLineCmt = true;
-                continue;
+            // cắt theo dấu ';' (không phụ thuộc tên token)
+            if (";".equals(t.getText())) {
+                String chunk = slice(sql, partStart, t.getStartIndex()).trim();
+                if (!chunk.isEmpty()) out.add(buildChunk(idx++, chunk));
+                partStart = t.getStopIndex() + 1;
             }
-            if (c == '/' && i + 1 < sql.length() && sql.charAt(i + 1) == '*') {
-                cur.append("/*");
-                i++;
-                inBlockCmt = true;
-                continue;
-            }
-            if (c == '$' && i + 1 < sql.length() && sql.charAt(i + 1) == '$') {
-                cur.append("$$");
-                i++;
-                inDollar = true;
-                continue;
-            }
-            if (c == '\'') {
-                cur.append(c);
-                inSingle = true;
-                continue;
-            }
-            if (c == ';') {
-                String s = cur.toString().trim();
-                if (!s.isEmpty()) out.add(s);
-                cur.setLength(0);
-                continue;
-            }
-
-            cur.append(c);
         }
-
-        String last = cur.toString().trim();
-        if (!last.isEmpty()) out.add(last);
         return out;
     }
 
     @Override
     public MetadataDto analyze(String statement) {
-        String srcForParse = statement.toUpperCase(Locale.ROOT);
-
-        CharStream cs = CharStreams.fromString(srcForParse);
-        PostgreSQLLexer lexer = new PostgreSQLLexer(cs);
-        CommonTokenStream tokens = new CommonTokenStream(lexer);
-        PostgreSQLParser parser = new PostgreSQLParser(tokens);
-
-        SyntaxErrorCounter err = new SyntaxErrorCounter();
-        lexer.removeErrorListeners();
-        parser.removeErrorListeners();
-        lexer.addErrorListener(err);
-        parser.addErrorListener(err);
-
-        PostgreSQLParser.SqlStatementContext ctx;
-
-        try {
-            ctx = parser.sqlStatement();
-        } catch (Exception e) {
-            return null;
+        if (statement == null || statement.isBlank()) {
+            return MetadataDto.builder().statementType("RAW_STATEMENT").build();
         }
 
-        if (err.hasError()) {
-            return null;
+        CharStream input = CharStreams.fromString(statement);
+        PostgreSQLLexer lexer = new PostgreSQLLexer(input);
+
+        List<Token> tokens = new ArrayList<>();
+        for (Token t = lexer.nextToken(); t.getType() != Token.EOF; t = lexer.nextToken()) {
+            tokens.add(t);
+        }
+        List<String> words = new ArrayList<>(tokens.size());
+        for (Token t : tokens) {
+            words.add(t.getText().toUpperCase(Locale.ROOT));
         }
 
-        return ctx.accept(new MetaVisitor());
+        int iCreate = indexOf(words, "CREATE");
+        if (iCreate >= 0) {
+            int iTable = indexOf(words, "TABLE", iCreate + 1);
+            if (iTable >= 0) {
+                NameParts np = readQualifiedName(tokens, iTable + 1);
+                return MetadataDto.builder()
+                        .statementType("CREATE_TABLE")
+                        .schemaName(np.schema)
+                        .objectName(np.object)
+                        .build();
+            }
+            int iIndex = indexOf(words, "INDEX", iCreate + 1);
+            if (iIndex >= 0) {
+                NameParts idx = readQualifiedName(tokens, iIndex + 1);
+                int iOn = indexOf(words, "ON", iIndex + 1 + idx.consumed);
+                NameParts tbl = (iOn >= 0) ? readQualifiedName(tokens, iOn + 1) : new NameParts(null, null, 0);
+                return MetadataDto.builder()
+                        .statementType("CREATE_INDEX")
+                        .schemaName(idx.schema)
+                        .objectName(idx.object)
+                        .tables(tbl.object == null ? List.of() : List.of(tbl.full()))
+                        .build();
+            }
+            int iView = indexOf(words, "VIEW", iCreate + 1);
+            if (iView >= 0) {
+                NameParts np = readQualifiedName(tokens, iView + 1);
+                return MetadataDto.builder()
+                        .statementType("CREATE_VIEW")
+                        .schemaName(np.schema)
+                        .objectName(np.object)
+                        .build();
+            }
+            int iFunc = indexOf(words, "FUNCTION", iCreate + 1);
+            if (iFunc >= 0) {
+                NameParts np = readQualifiedName(tokens, iFunc + 1);
+                return MetadataDto.builder()
+                        .statementType("CREATE_FUNCTION")
+                        .schemaName(np.schema)
+                        .objectName(np.object)
+                        .build();
+            }
+            int iProc = indexOf(words, "PROCEDURE", iCreate + 1);
+            if (iProc >= 0) {
+                NameParts np = readQualifiedName(tokens, iProc + 1);
+                return MetadataDto.builder()
+                        .statementType("CREATE_PROCEDURE")
+                        .schemaName(np.schema)
+                        .objectName(np.object)
+                        .build();
+            }
+            int iTrig = indexOf(words, "TRIGGER", iCreate + 1);
+            if (iTrig >= 0) {
+                NameParts np = readQualifiedName(tokens, iTrig + 1);
+                return MetadataDto.builder()
+                        .statementType("CREATE_TRIGGER")
+                        .schemaName(np.schema)
+                        .objectName(np.object)
+                        .build();
+            }
+        }
+
+        return MetadataDto.builder().statementType("RAW_STATEMENT").build();
     }
 
-    // ---------------------------------------------------------------------
-    // Visitor: rút MetadataDto cho từng loại câu lệnh
-    // ---------------------------------------------------------------------
+    /* ---------------------- helpers nhỏ ---------------------- */
 
-    private static class MetaVisitor extends PostgreSQLBaseVisitor<MetadataDto> {
+    private static SqlChunkDto buildChunk(int idx, String content) {
+        return SqlChunkDto.builder()
+                .index(idx)
+                .part(1)
+                .totalParts(1)
+                .dialect("postgresql")
+                .kind(null)
+                .content(content)
+                .build();
+    }
 
-        // ---------- CREATE TABLE ----------
-        @Override
-        public MetadataDto visitCreateTableStatement(PostgreSQLParser.CreateTableStatementContext ctx) {
-            String table = ctx.tableName.getText();
+    private static String slice(String src, int from, int to) {
+        int a = Math.max(0, from);
+        int b = Math.max(a, Math.min(src.length(), to));
+        return src.substring(a, b);
+    }
 
-            List<String> cols = new ArrayList<>();
-            if (ctx.tableElement() != null) {
-                for (PostgreSQLParser.TableElementContext el : ctx.tableElement()) {
-                    if (el.columnDefinition() != null && el.columnDefinition().columnName != null) {
-                        cols.add(el.columnDefinition().columnName.getText());
-                    }
+    private static int indexOf(List<String> words, String key) {
+        return indexOf(words, key, 0);
+    }
+
+    private static int indexOf(List<String> words, String key, int from) {
+        for (int i = Math.max(0, from); i < words.size(); i++) {
+            if (key.equals(words.get(i))) return i;
+        }
+        return -1;
+    }
+
+    private static NameParts readQualifiedName(List<Token> tokens, int from) {
+        String schema = null, object = null;
+        int i = from;
+
+        // bỏ '(' (phòng lỗi)
+        while (i < tokens.size() && "(".equals(tokens.get(i).getText())) i++;
+
+        if (i >= tokens.size()) return new NameParts(null, null, 0);
+        String t0 = tokens.get(i).getText();
+
+        if (isIdentLike(t0)) {
+            if (i + 1 < tokens.size() && ".".equals(tokens.get(i + 1).getText())) {
+                schema = stripQuote(t0);
+                if (i + 2 < tokens.size() && isIdentLike(tokens.get(i + 2).getText())) {
+                    object = stripQuote(tokens.get(i + 2).getText());
+                    i += 3;
+                } else {
+                    object = stripQuote(t0);
+                    i += 1;
                 }
+            } else {
+                object = stripQuote(t0);
+                i += 1;
             }
-
-            return MetadataDto.builder()
-                    .statementType("CREATE_TABLE")
-                    .schemaName(null)
-                    .objectName(table)
-                    .tables(List.of())
-                    .columns(cols)
-                    .build();
         }
 
-        // ---------- CREATE INDEX ----------
-        @Override
-        public MetadataDto visitCreateIndexStatement(PostgreSQLParser.CreateIndexStatementContext ctx) {
-            String indexName = ctx.indexName.getText();
-            String onTable   = ctx.tableName.getText();
-
-            List<String> cols = new ArrayList<>();
-            if (ctx.indexElem() != null) {
-                for (PostgreSQLParser.IndexElemContext e : ctx.indexElem()) {
-                    if (e.identifier() != null) cols.add(e.identifier().getText());
-                }
-            }
-
-            return MetadataDto.builder()
-                    .statementType(ctx.UNIQUE() != null ? "CREATE_UNIQUE_INDEX" : "CREATE_INDEX")
-                    .objectName(indexName)
-                    .tables(List.of(onTable))
-                    .columns(cols)
-                    .build();
-        }
-
-        // ---------- CREATE FUNCTION ----------
-        @Override
-        public MetadataDto visitCreateFunctionStatement(PostgreSQLParser.CreateFunctionStatementContext ctx) {
-            return MetadataDto.builder()
-                    .statementType("CREATE_FUNCTION")
-                    .objectName(ctx.funcName.getText())
-                    .tables(Collections.emptyList())
-                    .columns(Collections.emptyList())
-                    .build();
-        }
-
-        // ---------- CREATE PROCEDURE ----------
-        @Override
-        public MetadataDto visitCreateProcedureStatement(PostgreSQLParser.CreateProcedureStatementContext ctx) {
-            return MetadataDto.builder()
-                    .statementType("CREATE_PROCEDURE")
-                    .objectName(ctx.procName.getText())
-                    .tables(Collections.emptyList())
-                    .columns(Collections.emptyList())
-                    .build();
-        }
-
-        // ---------- DO $$...$$ ----------
-        @Override
-        public MetadataDto visitDoStatement(PostgreSQLParser.DoStatementContext ctx) {
-            return MetadataDto.builder()
-                    .statementType("DO_BLOCK")
-                    .tables(Collections.emptyList())
-                    .columns(Collections.emptyList())
-                    .build();
-        }
-
-        // ---------- CREATE TRIGGER ----------
-        @Override
-        public MetadataDto visitCreateTriggerStatement(PostgreSQLParser.CreateTriggerStatementContext ctx) {
-            return MetadataDto.builder()
-                    .statementType("CREATE_TRIGGER")
-                    .objectName(ctx.trgName.getText())
-                    .tables(List.of(ctx.onTable.getText()))
-                    .columns(Collections.emptyList())
-                    .build();
-        }
-
-        // ---------- CREATE TYPE ... AS ENUM ----------
-        @Override
-        public MetadataDto visitCreateTypeEnumStatement(PostgreSQLParser.CreateTypeEnumStatementContext ctx) {
-            List<String> labels = new ArrayList<>();
-            if (ctx.stringList() != null) {
-                for (TerminalNode s : ctx.stringList().STRING()) {
-                    labels.add(s.getText());
-                }
-            }
-            return MetadataDto.builder()
-                    .statementType("CREATE_TYPE_ENUM")
-                    .objectName(ctx.typeName.getText())
-                    .tables(Collections.emptyList())
-                    .columns(labels) // lưu nhãn enum vào 'columns' cho tiện tra cứu
-                    .build();
-        }
-
-        // ---------- CREATE EXTENSION ----------
-        @Override
-        public MetadataDto visitCreateExtensionStatement(PostgreSQLParser.CreateExtensionStatementContext ctx) {
-            return MetadataDto.builder()
-                    .statementType("CREATE_EXTENSION")
-                    .objectName(ctx.extName.getText())
-                    .tables(Collections.emptyList())
-                    .columns(Collections.emptyList())
-                    .build();
-        }
-
-        // ---------- CREATE DOMAIN ----------
-        @Override
-        public MetadataDto visitCreateDomainStatement(PostgreSQLParser.CreateDomainStatementContext ctx) {
-            return MetadataDto.builder()
-                    .statementType("CREATE_DOMAIN")
-                    .objectName(ctx.domainName.getText())
-                    .tables(Collections.emptyList())
-                    .columns(Collections.emptyList())
-                    .build();
-        }
-
-        // ---------- CREATE POLICY (RLS) ----------
-        @Override
-        public MetadataDto visitCreatePolicyStatement(PostgreSQLParser.CreatePolicyStatementContext ctx) {
-            return MetadataDto.builder()
-                    .statementType("CREATE_POLICY")
-                    .objectName(ctx.polName.getText())
-                    .tables(List.of(ctx.tbl.getText()))
-                    .columns(Collections.emptyList())
-                    .build();
-        }
-
-        // ---------- COMMENT ON ... ----------
-        @Override
-        public MetadataDto visitCommentOnStatement(PostgreSQLParser.CommentOnStatementContext ctx) {
-            // Ví dụ: COLUMN schema.tbl.col  |  TABLE schema.tbl
-            String fullName = ctx.commentName().getText();
-
-            String schema = null, object = fullName;
-            int dot = fullName.indexOf('.');
-            if (dot > 0) {
-                schema = fullName.substring(0, dot);
-                object = fullName.substring(dot + 1);
-            }
-
-            return MetadataDto.builder()
-                    .statementType("COMMENT_ON") // giữ thống nhất; nếu cần, nối target: "COMMENT_ON_" + ctx.commentTarget().getText()
-                    .schemaName(schema)
-                    .objectName(object)
-                    .tables(Collections.emptyList())
-                    .columns(Collections.emptyList())
-                    .build();
-        }
+        return new NameParts(schema, object, Math.max(0, i - from));
     }
 
-    // ---------------------------------------------------------------------
-    // Helpers
-    // ---------------------------------------------------------------------
-
-    private Token findFollowingSemicolon(CommonTokenStream tokens, int fromTokenIndex) {
-        List<Token> list = tokens.getTokens();
-        for (int i = fromTokenIndex + 1; i < list.size(); i++) {
-            Token t = list.get(i);
-            if (";".equals(t.getText())) return t;
-            if (t.getType() == Token.EOF) break;
-        }
-        return null;
+    private static boolean isIdentLike(String s) {
+        if (s == null || s.isEmpty()) return false;
+        char c0 = s.charAt(0);
+        return Character.isLetterOrDigit(c0) || c0 == '_' || c0 == '"' || c0 == '\'';
     }
 
-    private String safe(String s, int a, int b) {
-        int x = Math.max(0, Math.min(a, s.length()));
-        int y = Math.max(x, Math.min(b, s.length()));
-        return s.substring(x, y);
+    private static String stripQuote(String s) {
+        if (s == null || s.length() < 2) return s;
+        char f = s.charAt(0), l = s.charAt(s.length() - 1);
+        if ((f == '"' && l == '"') || (f == '\'' && l == '\'')) {
+            return s.substring(1, s.length() - 1);
+        }
+        return s;
     }
 
-    private static final class SyntaxErrorCounter extends BaseErrorListener {
-        private int count = 0;
-        @Override
-        public void syntaxError(Recognizer<?, ?> recognizer, Object offendingSymbol,
-                                int line, int charPositionInLine, String msg, RecognitionException e) {
-            count++;
+    private static final class NameParts {
+        final String schema;
+        final String object;
+        final int consumed;
+
+        NameParts(String schema, String object, int consumed) {
+            this.schema = schema;
+            this.object = object;
+            this.consumed = consumed;
         }
-        boolean hasError() { return count > 0; }
+
+        String full() {
+            if (schema == null || schema.isBlank()) return object;
+            return (object == null) ? null : (schema + "." + object);
+        }
     }
 }

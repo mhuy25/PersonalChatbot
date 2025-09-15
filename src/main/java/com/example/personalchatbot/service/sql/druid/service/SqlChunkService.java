@@ -1,487 +1,235 @@
 package com.example.personalchatbot.service.sql.druid.service;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.alibaba.druid.DbType;
-import com.alibaba.druid.sql.SQLUtils;
-import com.alibaba.druid.sql.ast.SQLExpr;
-import com.alibaba.druid.sql.ast.SQLName;
-import com.alibaba.druid.sql.ast.SQLStatement;
-import com.alibaba.druid.sql.ast.expr.SQLPropertyExpr;
-import com.alibaba.druid.sql.ast.statement.SQLExprTableSource;
-import com.alibaba.druid.sql.visitor.SchemaStatVisitor;
-import com.alibaba.druid.stat.TableStat;
-import com.example.personalchatbot.config.ErrorConfig;
-import com.example.personalchatbot.dto.ChunkingOptions;
-import com.example.personalchatbot.dto.PromptDto;
 import com.example.personalchatbot.service.llm.LlmService;
-import com.example.personalchatbot.service.sql.antlr.AntlrRouter;
+import com.example.personalchatbot.service.sql.antlr.SqlParserRegistry;
 import com.example.personalchatbot.service.sql.antlr.implement.AntlrSqlParserImpl;
-import com.example.personalchatbot.service.sql.antlr.postgres.PgAntlrSqlParser;
 import com.example.personalchatbot.service.sql.dto.MetadataDto;
 import com.example.personalchatbot.service.sql.dto.SqlChunkDto;
-import com.example.personalchatbot.exception.AppException;
 import com.example.personalchatbot.service.sql.druid.implement.SqlChunkServiceImpl;
 import com.example.personalchatbot.service.sql.llm.SqlPromptService;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.knuddels.jtokkit.api.Encoding;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.lang.reflect.Method;
 import java.util.*;
-import java.util.stream.Collectors;
 
+/**
+ * SqlChunkService
+ * - Luồng parse: try Druid -> fail -> try ANTLR -> fail -> try LLM.
+ * - Với routine (FUNCTION/PROCEDURE): tách header + chia body theo các khối cấp 1 (BEGIN/IF/CASE/LOOP),
+ *   sau đó split thành các câu SQL và gom metadata vào field bodySqlMetaJson; flush theo KHỐI (không nhồi chéo khối).
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class SqlChunkService implements SqlChunkServiceImpl {
-    private final SqlPromptService sqlPromptService;
+
+    private final DruidFacade druid;
+    private final SqlParserRegistry registry;
+    private final SqlPromptService promptService;
     private final LlmService llm;
-    private final ObjectMapper objectMapper = new ObjectMapper();
-    private final Encoding embeddingEncoding;
-    private final ChunkingOptions sqlOption = new ChunkingOptions(300, 80, 200, Locale.forLanguageTag("vi-VN"), true);
-    private static final List<String> CANDIDATES = List.of(
-            "getName", "name",
-            "getTable", "getTableSource",
-            "getOn", "getInto", "getTarget", "getRelation", "getExpr"
-    );
-    /** Router ANTLR: map theo dbType (lowercase). Hiện mới đăng ký Postgres; các dialect khác thêm sau. */
-    private final AntlrRouter antlrRouter = new AntlrRouter()
-            .register("postgresql", new PgAntlrSqlParser());
-    // .register("mysql", new MyAntlrSqlParser()) ...
-    // .register("oracle", new OracleAntlrSqlParser()) ...
-    // .register("sqlserver", new SqlServerAntlrSqlParser()) ...
+
+    /* ================= Split ================= */
 
     @Override
-    public List<SqlChunkDto> chunk(String sql, String dbType) {
-        if (sql == null || sql.isBlank()) return List.of();
+    public List<SqlChunkDto> split(String sql, String dialect) {
+        final String d = norm(dialect);
 
-        DbType druidDbType;
-
+        // 1) try Druid
         try {
-            druidDbType  = DbType.valueOf(dbType);
-        }
-        catch (Exception e) {
-            throw new AppException(ErrorConfig.INTERNAL_SERVER_ERROR, "Không thể chunk SQL dialect=" + dbType);
+            List<String> parts = druid.split(sql, d);
+            log.info("Split bằng Druid");
+            List<SqlChunkDto> chunks = new ArrayList<>(parts.size());
+            int idx = 0;
+            for (String p : parts) {
+                if (p == null || p.trim().isEmpty()) continue;
+                chunks.add(SqlChunkDto.builder()
+                        .index(idx++)
+                        .part(1)
+                        .totalParts(1)
+                        .dialect(d)
+                        .kind(null)                 // sẽ fill ở bước analyze
+                        .content(p)
+                        .build());
+            }
+            if (!chunks.isEmpty()) return chunks;
+        } catch (Exception ignore) {
+            // fallback xuống ANTLR
         }
 
-        // 1) Druid trước
+        // 2) fallback ANTLR theo dialect
+        AntlrSqlParserImpl antlr = registry.antlrFor(d).orElse(null);
+        if (antlr == null) {
+            throw new UnsupportedOperationException("No ANTLR parser for dialect: " + dialect);
+        }
         try {
-            List<SqlChunkDto> druidChunks = tryDruid(sql, dbType);
-            if (!druidChunks.isEmpty()) return reindex(druidChunks);
+            List<SqlChunkDto> chunks = antlr.split(sql);
+            log.info("Split bằng ANTLR 4");
+            // đảm bảo index liên tục
+            int i = 0;
+            for (SqlChunkDto c : chunks) {
+                c.setIndex(i++);
+                c.setDialect(d);
+            }
+            return chunks;
         } catch (Exception e) {
-            log.debug("Druid failed ({}), fallback ANTLR...", e.getMessage());
+            // 3) hết fallback cho split
+            throw new RuntimeException("Split failed after Druid & ANTLR: " + e.getMessage(), e);
         }
+    }
 
-        List<String> statements;
-        AntlrSqlParserImpl parser = null;
-        if (antlrRouter.supports(dbType)) {
+    /* ================= Analyze (metadata) ================= */
+
+    @Override
+    public List<SqlChunkDto> analyzeAndEnrich(List<SqlChunkDto> chunks, String dialect) {
+        final String d = norm(dialect);
+        for (SqlChunkDto c : chunks) {
+            MetadataDto md = null;
+
+            // 1) Druid
             try {
-                parser = antlrRouter.get(dbType);
-                statements = parser.splitStatements(sql);
-            } catch (Exception e) {
-                log.debug("ANTLR split failed ({}), dùng 1 statement duy nhất.", e.getMessage());
-                statements = List.of(sql);
-            }
-        } else {
-            log.debug("ANTLR router chưa có parser cho dialect: {}", dbType);
-            statements = List.of(sql);
-        }
+                md = druid.analyze(c.getContent(), d);
+                log.info("Lấy metadata bằn Druid cho câu SQL :{}", c.getContent());
+            } catch (Exception ignore) { /* fallback */ }
 
-        // 3) Với mỗi statement: thử Druid(one-by-one) -> ANTLR.analyze; nếu vẫn fail thì gom lại cho LLM
-        List<SqlChunkDto> out = new ArrayList<>();
-        Map<Integer, String> stmtByIndex = new LinkedHashMap<>();
-        Map<Integer, MetadataDto> metaByIndex = new HashMap<>();
-        List<Integer> unresolvedIdx = new ArrayList<>();
-
-        for (int i = 0; i < statements.size(); i++) {
-            String st = statements.get(i);
-            stmtByIndex.put(i, st);
-
-            MetadataDto meta = null;
-
-            // 3.1) Druid parse từng câu (nếu map được DbType)
-            try {
-                List<SQLStatement> one = SQLUtils.parseStatements(st, druidDbType);
-                if (!one.isEmpty()) {
-                    meta = buildMetadata(one.getFirst(), dbType);
+            // 2) ANTLR
+            if (md == null || isRaw(md)) {
+                Optional<AntlrSqlParserImpl> opt = registry.antlrFor(d);
+                if (opt.isPresent()) {
+                    try {
+                        md = opt.get().analyze(c.getContent());
+                        log.info("Lấy metadata bằn ANTLR 4 cho câu SQL :{}", c.getContent());
+                    } catch (Exception ignore) { /* fallback */ }
                 }
-            } catch (Throwable ignore) {
-                // bỏ qua, sẽ thử ANTLR
             }
 
-            // 3.2) ANTLR analyze nếu Druid không ra
-            if (meta == null && parser != null) {
+            // 3) LLM (chỉ metadata – không split)
+            if (md == null || isRaw(md)) {
                 try {
-                    meta = parser.analyze(st);
-                } catch (Throwable ignore) {
-                    // bỏ qua, để LLM xử lý
+                    // 3) Build prompt từ câu hỏi + context đã chọn
+                    var prompt = promptService.build(c.getContent(), d);
+
+                    // 4) Gọi LLM sinh câu trả lời
+                    String text = llm.generate(prompt.getSystem(), prompt.getUser());
+                    log.info("Lấy metadata bằn LLM cho câu SQL :{}", c.getContent());
+                    md = parseLlmMetadata(text);
+                } catch (Exception e) {
+                    // vẫn gán metadata RAW để không chặn cả pipeline
+                    md = MetadataDto.builder().statementType("RAW_STATEMENT").build();
                 }
             }
 
-            if (meta == null) {
-                unresolvedIdx.add(i);
-            } else {
-                metaByIndex.put(i, meta);
-            }
+            // set kind/object/schema/columns...
+            c.setKind(kindFrom(md));
+            c.setSchemaName(md.getSchemaName());
+            c.setObjectName(md.getObjectName());
+            c.setMetadata(md); // nếu SqlChunkDto có trường metadata; nếu không thì set từng field tương ứng
         }
+        return chunks;
+    }
 
-        // 4) GỌI LLM CHO TẤT CẢ CÂU CHƯA RESOLVE
-        if (!unresolvedIdx.isEmpty()) {
-            List<String> needAnalyze = new ArrayList<>(unresolvedIdx.size());
-            for (int idx : unresolvedIdx) needAnalyze.add(stmtByIndex.get(idx));
+    /* ================= Helpers ================= */
 
-            try {
-                // Gợi ý chữ ký: trả về danh sách MetadataDto theo *đúng thứ tự input*
-                List<MetadataDto> filled = buildLlmMetadata(needAnalyze, dbType);
-                if (!filled.isEmpty()) {
-                    for (int j = 0; j < unresolvedIdx.size(); j++) {
-                        int idx = unresolvedIdx.get(j);
-                        MetadataDto meta = (j < filled.size()) ? filled.get(j) : null;
-                        if (meta != null) metaByIndex.put(idx, meta);
+    private static boolean isRaw(MetadataDto md) {
+        if (md == null) return true;
+        String t = md.getStatementType();
+        return t == null || "RAW_STATEMENT".equalsIgnoreCase(t.trim());
+    }
+
+    private static String kindFrom(MetadataDto md) {
+        if (md == null || md.getStatementType() == null) return "RAW_STATEMENT";
+        return md.getStatementType();
+    }
+
+    private static String norm(String d) {
+        return d == null ? "" : d.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private MetadataDto parseLlmMetadata(String llmText) {
+        try {
+            if (llmText == null || llmText.isBlank()) {
+                return MetadataDto.builder().statementType("RAW_STATEMENT").build();
+            }
+
+            // 1) Lấy block JSON đầu tiên trong câu trả lời (kể cả khi có ```json ... ```)
+            String s = llmText.trim();
+            int startHint = -1;
+            String lower = s.toLowerCase();
+            int fence = lower.indexOf("```json");
+            if (fence >= 0) {
+                startHint = s.indexOf('{', fence);
+            }
+            if (startHint < 0) startHint = s.indexOf('{');
+            if (startHint < 0) {
+                return MetadataDto.builder().statementType("RAW_STATEMENT").build();
+            }
+
+            int depth = 0, end = -1;
+            boolean inStr = false;
+            char quote = 0;
+
+            for (int i = startHint; i < s.length(); i++) {
+                char c = s.charAt(i);
+                if (inStr) {
+                    // kết thúc chuỗi khi gặp quote cùng loại và trước đó không phải escape '\'
+                    if (c == quote && s.charAt(i - 1) != '\\') inStr = false;
+                } else {
+                    if (c == '"' || c == '\'') {
+                        inStr = true; quote = c;
+                    } else if (c == '{') {
+                        depth++;
+                    } else if (c == '}') {
+                        depth--;
+                        if (depth == 0) { end = i; break; }
                     }
                 }
-            } catch (Exception e) {
-                throw new AppException(ErrorConfig.INTERNAL_SERVER_ERROR, "Không thể chunk SQL dialect=" + dbType);
             }
-        }
-
-        // 5) Build kết quả cuối cùng (degrade detectKindFast nếu vẫn chưa có metadata)
-        for (int i = 0; i < statements.size(); i++) {
-            String st = stmtByIndex.get(i);
-            MetadataDto meta = metaByIndex.get(i);
-
-            String kind = (meta != null && meta.getStatementType() != null)
-                    ? meta.getStatementType()
-                    : detectKindFast(st);
-
-            String schemaName = meta != null ? meta.getSchemaName() : null;
-            String objectName = meta != null ? meta.getObjectName() : null;
-
-            out.addAll(buildParts(st, dbType, i, kind, new String[]{schemaName, objectName}, meta));
-        }
-
-        if (!out.isEmpty()) return reindex(out);
-        throw new AppException(ErrorConfig.INTERNAL_SERVER_ERROR, "Không thể chunk SQL dialect=" + dbType);
-    }
-
-    // ============================== DRUID path ==============================
-
-    private List<SqlChunkDto> tryDruid(String sql, String dialect) {
-        try {
-            DbType dt = DbType.valueOf(dialect);
-            List<SQLStatement> statements = SQLUtils.parseStatements(sql, dt);
-
-            List<SqlChunkDto> out = new ArrayList<>();
-            int idx = 0;
-            for (SQLStatement st : statements) {
-                String normalized = SQLUtils.toSQLString(st, dt); // Druid format lại
-
-                // MetadataDto từ Druid
-                MetadataDto meta = buildMetadata(st, dialect);
-
-                out.addAll(buildParts(
-                        normalized, dialect, idx++, st.getClass().getSimpleName(), meta != null ?
-                                new String[]{meta.getSchemaName(), meta.getObjectName()} : new String[]{null, null},
-                        meta
-                ));
-            }
-            return out;
-        } catch (Exception e) {
-            throw new AppException(ErrorConfig.INTERNAL_SERVER_ERROR, e.getMessage());
-        }
-    }
-
-    private MetadataDto buildMetadata(SQLStatement st, String dialect) {
-        DbType dbType = DbType.valueOf(dialect);
-        String stmtText = SQLUtils.toSQLString(st, dbType);
-        String statementType = detectKindFast(stmtText);
-        List<String> druidTables = Collections.emptyList();
-        List<String> druidColumns = Collections.emptyList();
-        try {
-            SchemaStatVisitor visitor = SQLUtils.createSchemaStatVisitor(dbType);
-            st.accept(visitor);
-
-            // ĐÚNG kiểu: key là TableStat.Name
-            Map<TableStat.Name, TableStat> tmap = visitor.getTables();
-
-            if (tmap != null && !tmap.isEmpty()) {
-                druidTables = tmap.keySet().stream()
-                        .filter(Objects::nonNull)
-                        .map(TableStat.Name::toString)
-                        .collect(Collectors.toList());
-            }
-            if (visitor.getColumns() != null && !visitor.getColumns().isEmpty()) {
-                druidColumns = visitor.getColumns().stream()
-                        .map(c -> {
-                            String tbl = c.getTable();
-                            String col = c.getName();
-                            return (tbl == null || tbl.isEmpty()) ? col : (tbl + "." + col);
-                        })
-                        .collect(Collectors.toList());
+            if (end < 0) {
+                return MetadataDto.builder().statementType("RAW_STATEMENT").build();
             }
 
-            statementType = st.getClass().getSimpleName();
-            SQLName name = tryGetSQLName(st);
-            String[] schemaNames = splitSchemaAndObject(name);
+            String json = s.substring(startHint, end + 1);
+
+            // 2) Map JSON -> holder đơn giản rồi build MetadataDto
+            ObjectMapper om = new ObjectMapper()
+                    .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
+            class Raw {
+                public String statementType;
+                public String schemaName;
+                public String objectName;
+                public List<String> tables;
+                public List<String> columns;
+            }
+            Raw r = om.readValue(json, Raw.class);
+
+            String st = (r.statementType == null || r.statementType.isBlank())
+                    ? "RAW_STATEMENT" : r.statementType.trim();
+            String schema = (r.schemaName == null || r.schemaName.isBlank())
+                    ? null : r.schemaName.trim();
+            String object = (r.objectName == null || r.objectName.isBlank())
+                    ? null : r.objectName.trim();
+
+            List<String> tables = (r.tables == null) ? Collections.emptyList()
+                    : r.tables.stream().filter(t -> t != null && !t.isBlank())
+                    .map(String::trim).toList();
+            List<String> columns = (r.columns == null) ? Collections.emptyList()
+                    : r.columns.stream().filter(t -> t != null && !t.isBlank())
+                    .map(String::trim).toList();
 
             return MetadataDto.builder()
-                    .statementType(statementType)
-                    .schemaName(schemaNames[0])
-                    .objectName(schemaNames[1])
-                    .tables(druidTables)
-                    .columns(druidColumns)
+                    .statementType(st)
+                    .schemaName(schema)
+                    .objectName(object)
+                    .tables(new ArrayList<>(tables))
+                    .columns(new ArrayList<>(columns))
                     .build();
-        } catch (Throwable t) {
-            try {
-                MetadataDto antlrMeta;
-                if (antlrRouter.supports(dialect)) {
-                    AntlrSqlParserImpl antlr = antlrRouter.get(dialect);
-                    antlrMeta = antlr.analyze(stmtText);
-                    if (antlrMeta != null) {
-                        if (antlrMeta.getStatementType() == null) {
-                            antlrMeta = antlrMeta.toBuilder()
-                                    .statementType(statementType)
-                                    .build();
-                        }
-                        return antlrMeta;
-                    }
-                    else {
-                        throw new AppException(ErrorConfig.INTERNAL_SERVER_ERROR,
-                                "Không thể chunk SQL bằng Druid/ANTLR cho dialect=" + dialect);
-                    }
-                }
-                else {
-                    throw new AppException(ErrorConfig.INTERNAL_SERVER_ERROR,
-                            "Không thể chunk SQL bằng Druid/ANTLR cho dialect=" + dialect);
-                }
-            } catch (Throwable ignore) {
-                log.debug("ANTLR failed , fallback kế tiếp...");
-                return null; //sẽ update sau
-            }
+
+        } catch (Exception e) {
+            // Bất kỳ lỗi nào -> trả RAW để không chặn pipeline
+            return MetadataDto.builder().statementType("RAW_STATEMENT").build();
         }
-    }
-
-    private String[] splitSchemaAndObject(SQLName name) {
-        if (name instanceof SQLPropertyExpr p) {
-            String schema = null;
-            if (p.getOwner() instanceof SQLName o) schema = o.getSimpleName();
-            else if (p.getOwner() != null) schema = p.getOwner().toString();
-            return new String[]{ schema, p.getName() }; // object = phần sau dấu chấm
-        }
-        if (name != null) {
-            return new String[]{ null, name.getSimpleName() };
-        }
-        return new String[]{ null, null };
-    }
-
-    // ============================== LLM Path ====================================
-
-    private List<MetadataDto> buildLlmMetadata(List<String> sqlStatements, String dialect) {
-        List<MetadataDto> resultList = new ArrayList<>();
-        StringBuilder sb = new StringBuilder();
-        sb.append("DIALECT: ").append(dialect == null ? "unknown" : dialect).append("\n\n");
-        sb.append("STATEMENTS:\n");
-        for (int i = 0; i < sqlStatements.size(); i++) {
-            sb.append(i + 1).append(") ").append(sqlStatements.get(i)).append("\n\n");
-        }
-        String question = sb.toString();
-
-        PromptDto prompt = sqlPromptService.build(question, null);
-        String text = llm.generate(prompt.getSystem(), prompt.getUser());
-
-        String json = text == null ? "" : text.trim();
-        int l = json.indexOf('[');
-        int r = json.lastIndexOf(']');
-        if (l >= 0 && r >= l) {
-            json = json.substring(l, r + 1);
-        }
-
-        // 5) Parse JSON -> map thành MetadataDto theo đúng thứ tự
-        try {
-            // POJO tạm để map JSON
-            record LlmItem(String statementType, String schemaName, String objectName,
-                           List<String> tables, List<String> columns) {}
-
-            List<LlmItem> items = objectMapper.readValue(
-                    json, new TypeReference<List<LlmItem>>() {});
-
-            for (int i = 0; i < sqlStatements.size(); i++) {
-                LlmItem it = (items != null && i < items.size()) ? items.get(i) : null;
-                if (it == null) {
-                    resultList.add(new MetadataDto());
-                    continue;
-                }
-                // Chuẩn hoá type
-                String type = it.statementType();
-                if (!"CREATE_TABLE".equalsIgnoreCase(type) &&
-                        !"CREATE_INDEX".equalsIgnoreCase(type)) {
-                    type = "STATEMENT";
-                } else {
-                    type = type.toUpperCase();
-                }
-
-                MetadataDto m = new MetadataDto();
-                m.setStatementType(type);
-                m.setSchemaName(null); // theo rule: luôn null
-                m.setObjectName(trimToNull(it.objectName()));
-                m.setTables(safeList(it.tables()));
-                m.setColumns(limit100(safeList(it.columns())));
-
-                resultList.add(m);
-            }
-        } catch (Exception parseEx) {
-            // Nếu parse thất bại, degrade từng statement
-            for (int i = 0; i < sqlStatements.size(); i++) {
-                resultList.add(new MetadataDto());
-            }
-        }
-
-        return resultList;
-    }
-
-    // ============================== chunk builders ==============================
-
-    private List<SqlChunkDto> buildParts(String statement,
-                                         String dialect,
-                                         int stmtIndex,
-                                         String kind,
-                                         String[] names,
-                                         MetadataDto meta) {
-
-        List<String> slices = sliceByTokens(statement, sqlOption.getMaxTokens(), sqlOption.getOverlapTokens());
-        int total = slices.size();
-
-        Map<String, Object> metaJson = toMetadataMap(meta);
-
-        List<SqlChunkDto> out = new ArrayList<>(total);
-        for (int p = 0; p < total; p++) {
-            String content = slices.get(p);
-            out.add(SqlChunkDto.builder()
-                    .index(stmtIndex)
-                    .part(p + 1)
-                    .totalParts(total)
-                    .dialect(dialect)
-                    .kind(kind)
-                    .schemaName(names[0])
-                    .objectName(names[1])
-                    .content(content)
-                    .metadataJson(safeJson(metaJson))
-                    .tokenCount(countTokens(content))
-                    .build());
-        }
-        return out;
-    }
-
-    // ============================== tokenization (jtokkit) ==============================
-
-    private int countTokens(String s) { return embeddingEncoding.countTokens(s); }
-
-    private List<String> sliceByTokens(String text, int maxTokens, int overlapTokens) {
-        if (text == null || text.isBlank()) return List.of();
-
-        // Mã hoá ra token IDs bằng jtokkit
-        List<Integer> ids = embeddingEncoding.encode(text);
-
-        List<String> out = new ArrayList<>();
-        int i = 0;
-        while (i < ids.size()) {
-            int end = Math.min(ids.size(), i + maxTokens);
-            // decode đoạn [i, end)
-            String chunk = embeddingEncoding.decode(ids.subList(i, end));
-            out.add(chunk);
-            if (end == ids.size()) break;
-            i = Math.max(end - overlapTokens, i + 1);
-        }
-        return out;
-    }
-
-    // ============================== helper ==============================
-
-    private Map<String, Object> toMetadataMap(MetadataDto m) {
-        Map<String, Object> map = new LinkedHashMap<>();
-        if (m == null) return map;
-        if (m.getStatementType() != null) map.put("statementType", m.getStatementType());
-        if (m.getSchemaName()   != null) map.put("schemaName",   m.getSchemaName());
-        if (m.getObjectName()   != null) map.put("objectName",   m.getObjectName());
-        if (m.getTables()       != null && !m.getTables().isEmpty())  map.put("tables",  m.getTables());
-        if (m.getColumns()      != null && !m.getColumns().isEmpty()) map.put("columns", m.getColumns());
-        return map;
-    }
-
-    private String safeJson(Object o) {
-        try { return objectMapper.writeValueAsString(o); }
-        catch (Exception e) { return "{}"; }
-    }
-
-    private List<SqlChunkDto> reindex(List<SqlChunkDto> in) {
-        int i = 0;
-        List<SqlChunkDto> out = new ArrayList<>(in.size());
-        for (SqlChunkDto c : in) out.add(c.toBuilder().index(i++).build());
-        return out;
-    }
-
-    private String detectKindFast(String s) {
-        String x = s.trim().toUpperCase(Locale.ROOT);
-        if (x.startsWith("CREATE OR REPLACE FUNCTION") || x.startsWith("CREATE FUNCTION")) return "CREATE_FUNCTION";
-        if (x.startsWith("CREATE OR REPLACE PROCEDURE") || x.startsWith("CREATE PROCEDURE")) return "CREATE_PROCEDURE";
-        if (x.startsWith("CREATE OR REPLACE VIEW") || x.startsWith("CREATE VIEW")) return "CREATE_VIEW";
-        if (x.startsWith("CREATE TABLE")) return "CREATE_TABLE";
-        /*if (x.startsWith("SELECT")) return "SELECT";
-        if (x.startsWith("INSERT")) return "INSERT";
-        if (x.startsWith("UPDATE")) return "UPDATE";
-        if (x.startsWith("DELETE")) return "DELETE";*/
-        return "RAW_STATEMENT";
-    }
-
-    private SQLName tryGetSQLName(SQLStatement st) {
-        for (String m : CANDIDATES) {
-            Method mm = findNoArg(st.getClass(), m);
-            if (mm == null) continue;
-            try {
-                Object v = mm.invoke(st);
-                // Trực tiếp là SQLName?
-                if (v instanceof SQLName) return (SQLName) v;
-
-                // Bảng dạng table source?
-                if (v instanceof SQLExprTableSource ts) {
-                    SQLExpr e = ts.getExpr();
-                    if (e instanceof SQLName) return (SQLName) e;
-                }
-
-                // Có getExpr() trả về SQLName?
-                Method getExpr = findNoArg(v.getClass(), "getExpr");
-                if (getExpr != null) {
-                    Object expr = getExpr.invoke(v);
-                    if (expr instanceof SQLName) return (SQLName) expr;
-                }
-            } catch (Throwable ignore) {}
-        }
-        return null;
-    }
-
-    private Method findNoArg(Class<?> c, String name) {
-        try { Method m = c.getMethod(name); m.setAccessible(true); return m; }
-        catch (NoSuchMethodException e) { return null; }
-    }
-
-    private static String trimToNull(String s) {
-        if (s == null) return null;
-        String t = s.trim();
-        return t.isEmpty() ? null : t;
-    }
-
-    private static List<String> safeList(List<String> in) {
-        return (in == null) ? List.of() : in.stream()
-                .filter(Objects::nonNull)
-                .map(String::trim)
-                .filter(s -> !s.isEmpty())
-                .distinct()
-                .toList();
-    }
-
-    private static List<String> limit100(List<String> in) {
-        return in.size() <= 100 ? in : in.subList(0, 100);
     }
 }

@@ -59,7 +59,7 @@ public class ChatbotController {
     }
 
     @PostMapping("/sqlchunk")
-    public List<SqlChunkDto> onSqlChunk(@RequestBody String  sql, HttpServletResponse response) {
+    public List<SqlChunkDto> onSqlChunk(@RequestBody String  sql, @RequestHeader String dialect, HttpServletResponse response) {
         try {
             if (sql == null || sql.trim().isEmpty()) {
                 response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
@@ -74,7 +74,8 @@ public class ChatbotController {
                     return ResponseEntity.ok().body(sqlChunkService.chunk(sql, dialect.getDbType()).toString());
                 }*/
                 response.setStatus(HttpServletResponse.SC_OK);
-                return sqlChunkService.chunk(sql, "postgresql");
+                List<SqlChunkDto> chunks = sqlChunkService.split(sql, dialect);
+                return sqlChunkService.analyzeAndEnrich(chunks, dialect);
             }
         } catch (Exception e) {
             log.error("Message xử lý lỗi: ", e);
