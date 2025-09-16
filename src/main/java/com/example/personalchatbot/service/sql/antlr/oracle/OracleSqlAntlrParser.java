@@ -6,9 +6,7 @@ import com.example.personalchatbot.service.sql.antlr.oracle.OracleSQLLexer;
 import com.example.personalchatbot.service.sql.antlr.oracle.OracleSQLBaseVisitor;
 import com.example.personalchatbot.service.sql.dto.MetadataDto;
 import com.example.personalchatbot.service.sql.dto.SqlChunkDto;
-import jakarta.annotation.PostConstruct;
 import lombok.NonNull;
-import lombok.extern.slf4j.Slf4j;
 import org.antlr.v4.runtime.*;
 import org.springframework.stereotype.Component;
 
@@ -16,17 +14,12 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-@Slf4j
 @Component
-public class OracleSqlParser implements AntlrSqlParserImpl {
+public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
+
     @Override public String dialect() {
         return "oracle";
     }
-
-    @PostConstruct
-    void ok() { log.info("OracleSqlParser bean is alive"); }
-
-    /* ===================== split ===================== */
 
     @Override
     public List<SqlChunkDto> split(@NonNull String sql) {
