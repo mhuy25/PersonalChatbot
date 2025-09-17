@@ -23,7 +23,7 @@ import java.util.List;
 /**
  * Facade cho Alibaba Druid: tách câu & lấy metadata cho từng câu.
  * - splitStatements(): Dùng Druid splitter (không regex). Nếu Druid fail, ném Exception để caller fallback sang ANTLR.
- * - analyze(): Dùng Druid AST để suy ra MetadataDto (CREATE TABLE/INDEX có type riêng; còn lại "STATEMENT").
+ * - analyze(): Dùng Druid AST để suy ra MetadataDto (CREATE TABLE/INDEX có type riêng; còn lại "RAW_STATEMENT").
  * Lưu ý:
  *   - Class này KHÔNG xử lý fallback. Fallback (ANTLR/LLM) nằm ở tầng service (SqlChunkServiceImpl) theo flow đã thống nhất.
  *   - Với các dialect ngoài MySQL/PostgreSQL, class sẽ ném UnsupportedOperationException để tầng trên quyết định fallback.
@@ -127,7 +127,7 @@ public class DruidFacade implements DruidFacadeImpl {
 
             // Không có visitor phù hợp -> metadata tối thiểu
             return MetadataDto.builder()
-                    .statementType("STATEMENT")
+                    .statementType("RAW_STATEMENT")
                     .build();
 
         } catch (Throwable t) {

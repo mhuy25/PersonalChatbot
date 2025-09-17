@@ -136,7 +136,7 @@ public class MySqlAntlrSqlParser implements AntlrSqlParserImpl {
                 if (type == MySQLLexer.DATABASE || type == MySQLLexer.SCHEMA) {
                     String name = readQualifiedName(ts, j + 1);
                     return MetadataDto.builder()
-                            .statementType("SQLCreateDatabaseStatement")
+                            .statementType("CREATE_DATABASE")
                             .objectName(emptyToNull(name))
                             .build();
                 }
@@ -146,7 +146,7 @@ public class MySqlAntlrSqlParser implements AntlrSqlParserImpl {
                     int k = skipIfNotExists(ts, j + 1);
                     String name = readQualifiedName(ts, k);
                     return MetadataDto.builder()
-                            .statementType("MySqlCreateTableStatement")
+                            .statementType("CREATE_TABLE")
                             .objectName(emptyToNull(nameOnly(name)))
                             .tables(name == null ? Collections.emptyList() :
                                     Collections.singletonList(name))
@@ -160,7 +160,7 @@ public class MySqlAntlrSqlParser implements AntlrSqlParserImpl {
                     int onPos = nextType(ts, k + 1, MySQLLexer.ON);
                     String tbl = readQualifiedName(ts, onPos + 1);
                     return MetadataDto.builder()
-                            .statementType("SQLCreateIndexStatement")
+                            .statementType("CREATE_INDEX")
                             .objectName(emptyToNull(nameOnly(idxName)))
                             .tables(tbl == null ? Collections.emptyList() :
                                     Collections.singletonList(tbl))
@@ -171,7 +171,7 @@ public class MySqlAntlrSqlParser implements AntlrSqlParserImpl {
                 if (type == MySQLLexer.VIEW) {
                     String name = readQualifiedName(ts, j + 1);
                     return MetadataDto.builder()
-                            .statementType("SQLCreateViewStatement")
+                            .statementType("CREATE_VIEW")
                             .objectName(emptyToNull(nameOnly(name)))
                             .build();
                 }
@@ -199,23 +199,6 @@ public class MySqlAntlrSqlParser implements AntlrSqlParserImpl {
     }
 
     /* --------------------- Tiny utilities (local) --------------------- */
-
-    private static int firstNonWsIndex(CommonTokenStream tokens, String src) {
-        for (Token t : tokens.getTokens()) {
-            if (t.getType() != Token.EOF && t.getType() != MySQLLexer.DELIM) {
-                return Math.max(0, t.getStartIndex());
-            }
-        }
-        // nếu không có token, trả 0
-        return 0;
-    }
-
-    private static String slice(String s, int from, int to) {
-        int a = Math.max(0, Math.min(from, s.length()));
-        int b = Math.max(0, Math.min(to, s.length()));
-        if (b <= a) return "";
-        return s.substring(a, b).trim();
-    }
 
     private static int nextNonDelim(List<Token> ts, int from) {
         int i = Math.max(0, from);

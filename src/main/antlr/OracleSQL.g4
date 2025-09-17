@@ -4,257 +4,293 @@ grammar OracleSQL;
 package com.example.personalchatbot.service.sql.antlr.oracle;
 }
 
-/* ---- Forward token declarations to avoid 'implicit definition' warnings ---- */
-tokens { SQLPLUS_SLASH }
+/*
+ * Mục tiêu grammar:
+ * - Đủ nhẹ để chunking và trích metadata cơ bản.
+ * - Bắt được:
+ *   + CREATE TABLE / GLOBAL TEMPORARY TABLE  → danh sách cột (columnDef)
+ *   + CREATE VIEW / CREATE MATERIALIZED VIEW → danh sách cột (selectList) & bảng (FROM/JOIN tableRef)
+ *   + Các DDL khác (INDEX/SEQUENCE/SYNONYM/TRIGGER/PACKAGE/PROCEDURE) để split + name
+ *   + COMMENT, ALTER SESSION, anonymous PL/SQL block
+ * - Không fully-typed Oracle SQL. Dùng rule "parens" để chịu được ngoặc lồng nhau.
+ */
 
-/* ===== Lexer helpers ===== */
-@lexer::members {
-  private boolean atStartOfLine() {
-    int prev = _input.LA(-1);
-    return prev == '\n' || prev == '\r' || getCharPositionInLine() == 0;
-  }
-}
+/* ============================== Parser rules ============================== */
 
-/* ================= PARSER (tolerant) ================= */
-
-sqlStatements
-    : (sqlStatement terminator?)* EOF
+sql
+    : (sqlStatement)+ EOF?
     ;
-
-terminator : SEMI | SQLPLUS_SLASH ;
 
 sqlStatement
-    : createSchemaStatement                      #StCreateSchema
-    | createTableStatement                       #StCreateTable
-    | createIndexStatement                       #StCreateIndex
-    | createViewStatement                        #StCreateView
-    | createFunctionStatement                    #StCreateFunction
-    | createProcedureStatement                   #StCreateProcedure
-    | dropStatement                              #StDrop
-    | selectStmt                                 #StSelect
-    | insertStmt                                 #StInsert
-    | updateStmt                                 #StUpdate
-    | deleteStmt                                 #StDelete
-    | unknownStatement                           #StUnknown
+    : stCreateTable
+    | stCreateGtt
+    | stCreateIndex
+    | stCreateView
+    | stCreateMaterializedView
+    | stCreateSequence
+    | stCreateSynonym
+    | stCreateTrigger
+    | stCreatePackageSpec
+    | stCreatePackageBody
+    | stCreateProcedure
+    | stAnonymousBlock
+    | stAlterSession
+    | stComment
+    | stOther
     ;
 
-/* -------- CREATE -------- */
+/* ---------- CREATE TABLE & GTT: bắt danh sách cột ---------- */
 
-createSchemaStatement : CREATE USER identifier ;
-
-createTableStatement
-    : CREATE (GLOBAL TEMPORARY | PRIVATE TEMPORARY)? TABLE tableName=qualifiedName
-      LPAREN columnDef (COMMA columnDef)* (COMMA tableConstraint)* RPAREN
-      tableOptions                      // <- không dùng dấu ? vì tableOptions đã có thể rỗng
+stCreateTable
+    :   CREATE TABLE tblName=qname
+        LPAREN tableElement ( COMMA tableElement )* RPAREN
+        ( . )*?                         // partitioning / options...
+        terminatorSemi
     ;
 
-tableOptions
-    : (ORGANIZATION HEAP
-      | ORGANIZATION INDEX
-      | NOPARALLEL
-      | PARALLEL INTEGER
-      )*
+stCreateGtt
+    :   CREATE GLOBAL TEMPORARY TABLE tblName=qname
+        LPAREN tableElement ( COMMA tableElement )* RPAREN
+        ( . )*?
+        terminatorSemi
     ;
 
-columnDef : columnName=identifier dataType columnConstraint* ;
-dataType  : identifier (LPAREN INTEGER (COMMA INTEGER)? RPAREN)? ;
-
-columnConstraint
-    : (CONSTRAINT identifier)?
-      ( PRIMARY KEY
-      | UNIQUE
-      | (NOT)? NULLX
-      | REFERENCES refTable=qualifiedName (LPAREN refColumnList RPAREN)?
-      | CHECK LPAREN booleanExpr RPAREN
-      )
+/** Một phần tử trong () của CREATE TABLE */
+tableElement
+    :   columnDef
+    |   otherElement
     ;
 
-tableConstraint
-    : (CONSTRAINT identifier)?
-      ( PRIMARY KEY LPAREN idList RPAREN
-      | UNIQUE LPAREN idList RPAREN
-      | FOREIGN KEY LPAREN idList RPAREN REFERENCES refTable=qualifiedName (LPAREN refColumnList RPAREN)?
-      )
+columnDef
+    :   colName=id columnTail
     ;
 
-idList        : identifier (COMMA identifier)* ;
-refColumnList : identifier (COMMA identifier)* ;
-
-createIndexStatement
-    : CREATE (UNIQUE)? INDEX indexName=qualifiedName
-      ON tableName=qualifiedName LPAREN indexElem (COMMA indexElem)* RPAREN
-      whereClause?
-    ;
-indexElem   : identifier (ASC | DESC)? ;
-whereClause : WHERE booleanExpr ;
-
-createViewStatement
-    : CREATE (OR REPLACE)? VIEW viewName=qualifiedName AS selectStmt
+/** Thân cột: mọi token cho tới ',' hoặc ')' top-level; cho phép ngoặc lồng nhau */
+columnTail
+    :   ( parens | ~(COMMA | RPAREN) )*
     ;
 
-createFunctionStatement
-    : CREATE (OR REPLACE)? FUNCTION funcName=qualifiedName LPAREN funcParams? RPAREN
-      (RETURN typeSpec)?
-      (DETERMINISTIC)?
-      (IS | AS) routineBody
+/** Các phần tử khác như CONSTRAINT ..., v.v. */
+otherElement
+    :   ( parens | ~(COMMA | RPAREN) )+
     ;
 
-createProcedureStatement
-    : CREATE (OR REPLACE)? PROCEDURE procName=qualifiedName LPAREN funcParams? RPAREN
-      (IS | AS) routineBody
+/** Ngoặc lồng nhau dùng đệ quy */
+parens
+    :   LPAREN ( parens | ~(LPAREN | RPAREN) )* RPAREN
     ;
 
-funcParams : funcParam (COMMA funcParam)* ;
-funcParam  : identifier identifier? ;
-
-typeSpec   : qualifiedName (LPAREN INTEGER (COMMA INTEGER)? RPAREN)? ;
-
-routineBody
-    : BEGIN junk* END (SEMI)?
-    | junk+
+/* ---------- CREATE INDEX (đơn giản) ---------- */
+stCreateIndex
+    :   CREATE ( BITMAP )? INDEX idxName=id ON qname
+        LPAREN ( parens | ~(LPAREN | RPAREN | SEMI) )* RPAREN
+        terminatorSemi
     ;
 
-/* -------- DROP -------- */
-
-dropStatement
-    : DROP
-      ( TABLE
-      | VIEW
-      | INDEX
-      | SEQUENCE
-      | TRIGGER
-      | FUNCTION
-      | PROCEDURE
-      | PACKAGE
-      | SYNONYM
-      | MATERIALIZED VIEW
-      | USER
-      )
-      junk*
+/* ---------- CREATE VIEW: lấy selectList & FROM/JOIN ---------- */
+stCreateView
+    :   CREATE ( OR REPLACE )? ( FORCE )? VIEW viewName=qname AS
+        selectStatement
+        terminatorSemi
     ;
 
-/* -------- DML (tolerant) -------- */
-
-selectStmt : SELECT junk* ;
-insertStmt : INSERT junk* ;
-updateStmt : UPDATE junk* ;
-deleteStmt : DELETE junk* ;
-
-/* -------- Helpers -------- */
-
-qualifiedName : identifier (DOT identifier)* ;
-identifier    : IDENTIFIER | DOUBLE_QUOTED_ID ;
-literal       : STRING | INTEGER | DECIMAL_LIT | TRUE | FALSE | NULLX ;
-
-booleanExpr : expr ;
-expr
-    : expr binaryOp expr
-    | functionCall
-    | qualifiedName
-    | literal
-    | LPAREN expr RPAREN
+/* ---------- CREATE MATERIALIZED VIEW: lấy selectList & FROM/JOIN ---------- */
+stCreateMaterializedView
+    :   CREATE MATERIALIZED VIEW mvName=qname
+        ( . )*?                         // BUILD/REFRESH ... (bỏ qua chi tiết)
+        AS
+        selectStatement
+        terminatorSemi
     ;
-binaryOp     : CONCAT | PLUS | MINUS | STAR | SLASH | PERCENT | CARET | EQ | LT | LTE | GT | GTE | NEQ ;
-functionCall : identifier LPAREN (expr (COMMA expr)*)? RPAREN ;
 
-junk             : ~SEMI ;
-unknownStatement : junk+ ;
+/* ---------- SELECT (tối giản, đủ lấy cột & bảng nguồn) ---------- */
+selectStatement
+    :   SELECT ( DISTINCT | ALL )? selectList fromClause selectTail?
+    ;
 
-/* ================= LEXER ================= */
+selectTail
+    :   ( WHERE | GROUP | HAVING | ORDER | UNION ) ( . )*?   // non-greedy: không cần chi tiết
+    ;
 
-/* case-insensitive fragments */
-fragment A:[aA]; fragment B:[bB]; fragment C:[cC]; fragment D:[dD]; fragment E:[eE];
-fragment F:[fF]; fragment G:[gG]; fragment H:[hH]; fragment I:[iI]; fragment J:[jJ];
-fragment K:[kK]; fragment L:[lL]; fragment M:[mM]; fragment N:[nN]; fragment O:[oO];
-fragment P:[pP]; fragment Q:[qQ]; fragment R:[rR]; fragment S:[sS]; fragment T:[tT];
-fragment U:[uU]; fragment V:[vV]; fragment W:[wW]; fragment X:[xX]; fragment Y:[yY];
-fragment Z:[zZ];
+selectList
+    :   selectItem ( COMMA selectItem )*
+    ;
 
-/* keywords */
-CREATE: C R E A T E;
-OR: O R;
-REPLACE: R E P L A C E;
-USER: U S E R;
-GLOBAL: G L O B A L;
-PRIVATE: P R I V A T E;
-TEMPORARY: T E M P O R A R Y;
-TABLE: T A B L E;
-PRIMARY: P R I M A R Y;
-KEY: K E Y;
-UNIQUE: U N I Q U E;
-FOREIGN: F O R E I G N;
-REFERENCES: R E F E R E N C E S;
-CHECK: C H E C K;
-CONSTRAINT: C O N S T R A I N T;   // <— thêm
-NOT: N O T;                       // <— thêm
-VIEW: V I E W;
-INDEX: I N D E X;
-SEQUENCE: S E Q U E N C E;
-TRIGGER: T R I G G E R;
-PACKAGE: P A C K A G E;
-SYNONYM: S Y N O N Y M;
-MATERIALIZED: M A T E R I A L I Z E D;
-ON: O N;
-WHERE: W H E R E;
-ASC: A S C;
-DESC: D E S C;
-FUNCTION: F U N C T I O N;
-PROCEDURE: P R O C E D U R E;
-RETURN: R E T U R N;
-RETURNS: R E T U R N S;
-IS: I S;
-AS: A S;
-BEGIN: B E G I N;
-END: E N D;
-DETERMINISTIC: D E T E R M I N I S T I C;
-ORGANIZATION: O R G A N I Z A T I O N;
-HEAP: H E A P;
-PARALLEL: P A R A L L E L;
-NOPARALLEL: N O P A R A L L E L;
+selectItem
+    :   expr=selectExpr ( (AS)? alias=id )?
+    ;
 
-DROP: D R O P;
+/**
+ * Biểu thức select cho tới dấu ',' top-level hoặc tới FROM.
+ * Không cho phép FROM/SEMI/SLASH trong nhánh không ngoặc để dừng hợp lý.
+ */
+selectExpr
+    :   ( parens | ~(COMMA | FROM | SEMI | SLASH) )+
+    ;
 
-SELECT: S E L E C T;
-INSERT: I N S E R T;
-UPDATE: U P D A T E;
-DELETE: D E L E T E;
-NULLX: N U L L;
-TRUE: T R U E;
-FALSE: F A L S E;
+fromClause
+    :   FROM tableRef ( joinClause )*
+    ;
 
-/* ops & punctuation */
-CONCAT : '||';
-STAR   : '*';
-SLASH  : '/';
-PLUS   : '+';
-MINUS  : '-';
-PERCENT: '%';
-CARET  : '^';
-LT     : '<';
-GT     : '>';
-LTE    : '<=';
-GTE    : '>=';
-NEQ    : '!=' | '<>';
-LPAREN : '(';
-RPAREN : ')';
-COMMA  : ',';
-DOT    : '.';
-EQ     : '=' ;
-SEMI   : ';' ;
+tableRef
+    :   qname ( id )?                   // alias (Oracle thường không dùng AS cho table)
+    ;
 
-/* sqlplus "/" line as terminator */
-SQLPLUS_SLASH
- : {atStartOfLine()}? '/' [ \t]* -> type(SEMI)
- ;
+joinClause
+    :   ( LEFT | RIGHT | FULL | INNER )? ( OUTER )? JOIN tableRef joinCond
+    ;
 
-/* identifiers & literals */
-DOUBLE_QUOTED_ID : '"' ( '""' | ~["\r\n] )* '"' ;
-IDENTIFIER       : [A-Za-z_][A-Za-z_0-9$]* ;
-INTEGER          : [0-9]+ ;
-DECIMAL_LIT      : [0-9]+ '.' [0-9]+ ;
-STRING           : '\'' ( ~['\\] | '\\' . )* '\'' ;
+joinCond
+    :   ON joinExpr
+    ;
 
-/* comments & ws */
-LINE_COMMENT  : '--' ~[\r\n]* -> skip ;
-BLOCK_COMMENT : '/*' .*? '*/' -> skip ;
-WS            : [ \t\r\n]+ -> skip ;
+joinExpr
+    :   ( parens | ~(JOIN | WHERE | GROUP | HAVING | ORDER | UNION | SEMI | SLASH) )*
+    ;
+
+/* ---------- CREATE SEQUENCE / SYNONYM (đơn giản) ---------- */
+stCreateSequence
+    :   CREATE SEQUENCE seqName=id ( . )*? terminatorSemi
+    ;
+
+stCreateSynonym
+    :   CREATE ( OR REPLACE )? SYNONYM synName=id FOR qname terminatorSemi
+    ;
+
+/* ---------- CREATE TRIGGER / PACKAGE / PROCEDURE ---------- */
+stCreateTrigger
+    :   CREATE ( OR REPLACE )? TRIGGER trgName=id
+        ( . )*?
+        BEGIN ( . )*? END ( id )?
+        ( terminatorSemi | slashTerm )
+    ;
+
+stCreatePackageSpec
+    :   CREATE ( OR REPLACE )? PACKAGE pkgName=id
+        ( . )*?
+        END ( id )?
+        slashTerm
+    ;
+
+stCreatePackageBody
+    :   CREATE ( OR REPLACE )? PACKAGE BODY pkgName=id
+        ( . )*?
+        END ( id )?
+        slashTerm
+    ;
+
+stCreateProcedure
+    :   CREATE ( OR REPLACE )? PROCEDURE procName=id
+        ( . )*?
+        END ( id )?
+        slashTerm
+    ;
+
+/* ---------- COMMENT ---------- */
+stComment
+    :   COMMENT ON ( TABLE qname | COLUMN qname DOT id ) IS stringLiteral terminatorSemi
+    ;
+
+/* ---------- ALTER SESSION ---------- */
+stAlterSession
+    :   ALTER SESSION SET ( . )*? terminatorSemi
+    ;
+
+/* ---------- Anonymous PL/SQL block (BEGIN ... END;) + "/" ---------- */
+stAnonymousBlock
+    :   BEGIN ( . )*? END terminatorSemi? slashTerm
+    ;
+
+/* ---------- Fallback cho statement khác (để vẫn split được) ---------- */
+stOther
+    :   ( . )*? ( terminatorSemi | slashTerm )
+    ;
+
+/* ---------- Helpers ---------- */
+terminatorSemi : SEMI ;
+slashTerm      : SLASH ;
+qname          : id ( DOT id )* ;
+id             : IDENTIFIER | QUOTED_IDENTIFIER ;
+stringLiteral  : STRING ;
+
+/* ============================== Lexer rules ============================== */
+
+/* Ký hiệu */
+LPAREN  : '(' ;
+RPAREN  : ')' ;
+COMMA   : ',' ;
+DOT     : '.' ;
+SEMI    : ';' ;
+SLASH   : '/' ;
+
+/* Keywords (uppercase) */
+CREATE  : 'CREATE' ;
+OR      : 'OR' ;
+REPLACE : 'REPLACE' ;
+FORCE   : 'FORCE' ;
+TABLE   : 'TABLE' ;
+GLOBAL  : 'GLOBAL' ;
+TEMPORARY : 'TEMPORARY' ;
+INDEX   : 'INDEX' ;
+BITMAP  : 'BITMAP' ;
+VIEW    : 'VIEW' ;
+MATERIALIZED : 'MATERIALIZED' ;
+SEQUENCE: 'SEQUENCE' ;
+SYNONYM : 'SYNONYM' ;
+TRIGGER : 'TRIGGER' ;
+PACKAGE : 'PACKAGE' ;
+BODY    : 'BODY' ;
+PROCEDURE : 'PROCEDURE' ;
+AS      : 'AS' ;
+IS      : 'IS' ;
+BEGIN   : 'BEGIN' ;
+END     : 'END' ;
+COMMENT : 'COMMENT' ;
+ON      : 'ON' ;
+COLUMN  : 'COLUMN' ;
+ALTER   : 'ALTER' ;
+SESSION : 'SESSION' ;
+SET     : 'SET' ;
+SELECT  : 'SELECT' ;
+DISTINCT: 'DISTINCT' ;
+ALL     : 'ALL' ;
+FROM    : 'FROM' ;
+WHERE   : 'WHERE' ;
+GROUP   : 'GROUP' ;
+BY      : 'BY' ;
+HAVING  : 'HAVING' ;
+ORDER   : 'ORDER' ;
+JOIN    : 'JOIN' ;
+LEFT    : 'LEFT' ;
+RIGHT   : 'RIGHT' ;
+FULL    : 'FULL' ;
+INNER   : 'INNER' ;
+OUTER   : 'OUTER' ;
+UNION   : 'UNION' ;
+BUILD   : 'BUILD' ;
+IMMEDIATE : 'IMMEDIATE' ;
+REFRESH : 'REFRESH' ;
+COMPLETE: 'COMPLETE' ;
+DEMAND  : 'DEMAND' ;
+FUNCTION: 'FUNCTION' ;
+RETURN  : 'RETURN' ;
+FOR     : 'FOR' ;
+
+/* Identifier & literal */
+QUOTED_IDENTIFIER
+    :   '"' ( '""' | ~["\r\n] )* '"'
+    ;
+
+IDENTIFIER
+    :   [A-Za-z_] [A-Za-z_0-9$#]*
+    ;
+
+/* Chuỗi ký tự (string literal) */
+STRING
+    :   '\'' ( '\'\'' | ~['\r\n] )* '\''
+    ;
+
+/* Bỏ qua khoảng trắng & comment */
+WS              : [ \t\r\n]+ -> skip ;
+LINE_COMMENT    : '--' ~[\r\n]* -> skip ;
+BLOCK_COMMENT   : '/*' .*? '*/' -> skip ;

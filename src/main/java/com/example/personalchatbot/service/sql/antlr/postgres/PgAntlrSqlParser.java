@@ -4,10 +4,10 @@ import com.example.personalchatbot.service.sql.dto.MetadataDto;
 import com.example.personalchatbot.service.sql.dto.SqlChunkDto;
 import org.antlr.v4.runtime.*;
 import com.example.personalchatbot.service.sql.antlr.implement.AntlrSqlParserImpl;
-import com.example.personalchatbot.service.sql.antlr.postgres.PostgreSQLLexer;
-import com.example.personalchatbot.service.sql.antlr.postgres.PostgreSQLParser;
-import com.example.personalchatbot.service.sql.antlr.postgres.PostgreSQLBaseVisitor;
 import org.springframework.stereotype.Component;
+import com.example.personalchatbot.service.sql.antlr.postgres.PostgreSQLParser;
+import com.example.personalchatbot.service.sql.antlr.postgres.PostgreSQLLexer;
+import com.example.personalchatbot.service.sql.antlr.postgres.PostgreSQLBaseVisitor;
 
 import java.util.*;
 
@@ -74,7 +74,7 @@ public class PgAntlrSqlParser implements AntlrSqlParserImpl {
         if (iCreate >= 0) {
             int iTable = indexOf(words, "TABLE", iCreate + 1);
             if (iTable >= 0) {
-                NameParts np = readQualifiedName(tokens, iTable + 1);
+                QName np = readQualifiedName(tokens, iTable + 1);
                 return MetadataDto.builder()
                         .statementType("CREATE_TABLE")
                         .schemaName(np.schema)
@@ -83,9 +83,9 @@ public class PgAntlrSqlParser implements AntlrSqlParserImpl {
             }
             int iIndex = indexOf(words, "INDEX", iCreate + 1);
             if (iIndex >= 0) {
-                NameParts idx = readQualifiedName(tokens, iIndex + 1);
+                QName idx = readQualifiedName(tokens, iIndex + 1);
                 int iOn = indexOf(words, "ON", iIndex + 1 + idx.consumed);
-                NameParts tbl = (iOn >= 0) ? readQualifiedName(tokens, iOn + 1) : new NameParts(null, null, 0);
+                QName tbl = (iOn >= 0) ? readQualifiedName(tokens, iOn + 1) : new QName(null, null, 0);
                 return MetadataDto.builder()
                         .statementType("CREATE_INDEX")
                         .schemaName(idx.schema)
@@ -95,7 +95,7 @@ public class PgAntlrSqlParser implements AntlrSqlParserImpl {
             }
             int iView = indexOf(words, "VIEW", iCreate + 1);
             if (iView >= 0) {
-                NameParts np = readQualifiedName(tokens, iView + 1);
+                QName np = readQualifiedName(tokens, iView + 1);
                 return MetadataDto.builder()
                         .statementType("CREATE_VIEW")
                         .schemaName(np.schema)
@@ -104,7 +104,7 @@ public class PgAntlrSqlParser implements AntlrSqlParserImpl {
             }
             int iFunc = indexOf(words, "FUNCTION", iCreate + 1);
             if (iFunc >= 0) {
-                NameParts np = readQualifiedName(tokens, iFunc + 1);
+                QName np = readQualifiedName(tokens, iFunc + 1);
                 return MetadataDto.builder()
                         .statementType("CREATE_FUNCTION")
                         .schemaName(np.schema)
@@ -113,7 +113,7 @@ public class PgAntlrSqlParser implements AntlrSqlParserImpl {
             }
             int iProc = indexOf(words, "PROCEDURE", iCreate + 1);
             if (iProc >= 0) {
-                NameParts np = readQualifiedName(tokens, iProc + 1);
+                QName np = readQualifiedName(tokens, iProc + 1);
                 return MetadataDto.builder()
                         .statementType("CREATE_PROCEDURE")
                         .schemaName(np.schema)
@@ -122,7 +122,7 @@ public class PgAntlrSqlParser implements AntlrSqlParserImpl {
             }
             int iTrig = indexOf(words, "TRIGGER", iCreate + 1);
             if (iTrig >= 0) {
-                NameParts np = readQualifiedName(tokens, iTrig + 1);
+                QName np = readQualifiedName(tokens, iTrig + 1);
                 return MetadataDto.builder()
                         .statementType("CREATE_TRIGGER")
                         .schemaName(np.schema)
@@ -164,14 +164,14 @@ public class PgAntlrSqlParser implements AntlrSqlParserImpl {
         return -1;
     }
 
-    private static NameParts readQualifiedName(List<Token> tokens, int from) {
+    private static QName readQualifiedName(List<Token> tokens, int from) {
         String schema = null, object = null;
         int i = from;
 
         // bỏ '(' (phòng lỗi)
         while (i < tokens.size() && "(".equals(tokens.get(i).getText())) i++;
 
-        if (i >= tokens.size()) return new NameParts(null, null, 0);
+        if (i >= tokens.size()) return new QName(null, null, 0);
         String t0 = tokens.get(i).getText();
 
         if (isIdentLike(t0)) {
@@ -190,7 +190,7 @@ public class PgAntlrSqlParser implements AntlrSqlParserImpl {
             }
         }
 
-        return new NameParts(schema, object, Math.max(0, i - from));
+        return new QName(schema, object, Math.max(0, i - from));
     }
 
     private static boolean isIdentLike(String s) {
@@ -208,20 +208,11 @@ public class PgAntlrSqlParser implements AntlrSqlParserImpl {
         return s;
     }
 
-    private static final class NameParts {
-        final String schema;
-        final String object;
-        final int consumed;
-
-        NameParts(String schema, String object, int consumed) {
-            this.schema = schema;
-            this.object = object;
-            this.consumed = consumed;
-        }
+    private record QName(String schema, String object, int consumed) {
 
         String full() {
-            if (schema == null || schema.isBlank()) return object;
-            return (object == null) ? null : (schema + "." + object);
+                if (schema == null || schema.isBlank()) return object;
+                return (object == null) ? null : (schema + "." + object);
+            }
         }
-    }
 }

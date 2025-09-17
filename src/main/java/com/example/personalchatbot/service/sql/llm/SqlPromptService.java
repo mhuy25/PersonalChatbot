@@ -15,7 +15,7 @@ public class SqlPromptService implements SqlPromptServiceImpl {
         String system =
                 "Bạn là chuyên gia phân tích SQL đa dialect (MySQL, PostgreSQL, ...). " +
                         "Nhiệm vụ: nhận MỘT câu SQL và trả về metadata ở dạng JSON THUẦN, không thêm lời giải thích. " +
-                        "Nếu không chắc kiểu câu lệnh, trả về \"statementType\":\"RAW_STATEMENT\" nhưng vẫn cố gắng liệt kê bảng/cột. " +
+                        "Nếu không chắc kiểu câu lệnh, trả về \"statementType\":\"RAW_STATEMENT(LLM)\" nhưng vẫn cố gắng liệt kê bảng/cột. " +
                         "Quy ước JSON:\n" +
                         "{\n" +
                         "  \"statementType\": string,               // ví dụ: SELECT / INSERT / UPDATE / DELETE / CREATE_TABLE / CREATE_INDEX / CREATE_VIEW / CREATE_FUNCTION / CREATE_PROCEDURE / CREATE_TRIGGER / CREATE_EVENT / RAW_STATEMENT\n" +
