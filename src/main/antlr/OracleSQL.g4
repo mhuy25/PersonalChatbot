@@ -159,10 +159,14 @@ stCreateSynonym
 
 /* ---------- CREATE TRIGGER / PACKAGE / PROCEDURE ---------- */
 stCreateTrigger
-    :   CREATE ( OR REPLACE )? TRIGGER trgName=id
-        ( . )*?
-        BEGIN ( . )*? END ( id )?
-        ( terminatorSemi | slashTerm )
+    : CREATE ( OR REPLACE )? TRIGGER trgName=id
+      ( . )*?
+      BEGIN ( . )*? END ( id )?
+      ( terminatorSemi )? slashTerm      // END; /  (có ; rồi /)
+    | CREATE ( OR REPLACE )? TRIGGER trgName=id
+      ( . )*?
+      BEGIN ( . )*? END ( id )?
+      terminatorSemi                      // chỉ END;
     ;
 
 stCreatePackageSpec
@@ -214,6 +218,27 @@ id             : IDENTIFIER | QUOTED_IDENTIFIER ;
 stringLiteral  : STRING ;
 
 /* ============================== Lexer rules ============================== */
+
+// ======= Operators & symbols (add these) =======
+CONCAT      : '||' ;                // đặt trước PIPE
+NEQ2        : '<>' ;
+NEQ1        : '!=' ;
+LE          : '<=' ;
+GE          : '>=' ;
+
+EQUAL       : '=' ;
+LT          : '<' ;
+GT          : '>' ;
+PLUS        : '+' ;
+MINUS       : '-' ;
+STAR        : '*' ;
+PERCENT     : '%' ;
+COLON       : ':' ;
+PIPE        : '|' ;
+
+// ======= Numbers (đủ dùng cho DDL) =======
+INT         : [0-9]+ ;
+DECIMAL     : [0-9]+ '.' [0-9]+ ;
 
 /* Ký hiệu */
 LPAREN  : '(' ;
