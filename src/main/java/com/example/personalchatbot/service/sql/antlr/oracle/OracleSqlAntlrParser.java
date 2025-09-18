@@ -7,6 +7,7 @@ import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
 import org.antlr.v4.runtime.*;
 import org.antlr.v4.runtime.misc.Interval;
+import org.antlr.v4.runtime.tree.TerminalNode;
 import org.springframework.stereotype.Component;
 import com.example.personalchatbot.service.sql.antlr.oracle.OracleSQLParser;
 import com.example.personalchatbot.service.sql.antlr.oracle.OracleSQLLexer;
@@ -307,7 +308,13 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
             if (ctx.alias != null) {
                 col = unquote(ctx.alias.getText());
             } else {
-                col = ctx.expr.getText();
+                // Fallback: nếu expr là qname hoặc qname.DOT.id thì lấy phần cuối
+                String raw = ctx.expr.getText();
+                // Không regex: phân tích theo cây con
+                // - Khi expr chứa qname DOT id → dùng ctx.expr subtree để tìm id cuối
+                // - Nếu không xác định được thì giữ lại raw
+                String tail = tryExtractTailIdFromExpr(ctx.expr); // viết util nhỏ, duyệt child nodes
+                col = (tail != null) ? unquote(tail) : raw;
             }
             columns.add(col);
             return null;
@@ -324,6 +331,21 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
         @Override
         public Void visitSelectStatement(OracleSQLParser.SelectStatementContext ctx) {
             return super.visitSelectStatement(ctx); // duyệt children
+        }
+
+        // duyệt subtree: nếu có qname DOT id → trả về id; nếu chỉ qname → trả qname
+        // nếu không tìm được, return null.
+        // (Sử dụng getRuleContexts / getChild để lần dấu id cuối cùng)
+        private String tryExtractTailIdFromExpr(OracleSQLParser.SelectExprContext expr) {
+            List<TerminalNode> ids = expr.getTokens(OracleSQLParser.IDENTIFIER);
+            if (ids != null && !ids.isEmpty()) {
+                return ids.getLast().getText();
+            }
+            List<TerminalNode> qids = expr.getTokens(OracleSQLParser.QUOTED_IDENTIFIER);
+            if (qids != null && !qids.isEmpty()) {
+                return qids.getLast().getText();
+            }
+            return null;
         }
     }
 

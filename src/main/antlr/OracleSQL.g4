@@ -173,21 +173,33 @@ stCreatePackageSpec
     :   CREATE ( OR REPLACE )? PACKAGE pkgName=id
         ( . )*?
         END ( id )?
-        slashTerm
+        ( terminatorSemi )? slashTerm          // ✅ cho phép END ... ; /
+    |   CREATE ( OR REPLACE )? PACKAGE pkgName=id
+        ( . )*?
+        END ( id )?
+        terminatorSemi                         // ✅ hoặc chỉ END ... ;
     ;
 
 stCreatePackageBody
     :   CREATE ( OR REPLACE )? PACKAGE BODY pkgName=id
         ( . )*?
         END ( id )?
-        slashTerm
+        ( terminatorSemi )? slashTerm
+    |   CREATE ( OR REPLACE )? PACKAGE BODY pkgName=id
+        ( . )*?
+        END ( id )?
+        terminatorSemi
     ;
 
 stCreateProcedure
     :   CREATE ( OR REPLACE )? PROCEDURE procName=id
         ( . )*?
         END ( id )?
-        slashTerm
+        ( terminatorSemi )? slashTerm
+    |   CREATE ( OR REPLACE )? PROCEDURE procName=id
+        ( . )*?
+        END ( id )?
+        terminatorSemi
     ;
 
 /* ---------- COMMENT ---------- */
