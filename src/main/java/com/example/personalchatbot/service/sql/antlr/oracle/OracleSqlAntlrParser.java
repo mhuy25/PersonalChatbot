@@ -14,7 +14,6 @@ import com.example.personalchatbot.service.sql.antlr.oracle.OracleSQLLexer;
 import com.example.personalchatbot.service.sql.antlr.oracle.OracleSQLBaseVisitor;
 
 import java.util.*;
-import java.util.stream.Collectors;
 
 @Slf4j
 @Component
@@ -145,49 +144,121 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
 
         @Override
         public MetadataDto visitStCreateTable(OracleSQLParser.StCreateTableContext ctx) {
-            String name = text(ctx.tblName);
-            List<String> cols = ctx.getRuleContexts(OracleSQLParser.ColumnDefContext.class)
-                    .stream()
-                    .map(c -> unquote(text(c.colName)))
-                    .collect(Collectors.toList());
+            String tableName = unquote(text(ctx.qname()));
+            TableScanner scanner = new TableScanner();
+            scanner.visit(ctx); // duyệt toàn bộ subtree
 
             return MetadataDto.builder()
                     .statementType("CREATE_TABLE")
                     .schemaName(null)
-                    .objectName(unquote(name))
-                    .tables(name != null ? Collections.singletonList(unquote(name)) : Collections.emptyList())
-                    .columns(cols)
+                    .objectName(tableName)
+                    .tables(Collections.singletonList(tableName))
+                    .columns(scanner.columns())        // tên cột
                     .build();
+        }
+
+        // ---- Scanner con cho CREATE TABLE ----
+        private static class TableScanner extends OracleSQLBaseVisitor<Void> {
+            private final List<String> columns = new ArrayList<>();
+            private final List<Map<String, Object>> columnDetails = new ArrayList<>();
+            private final Map<String, Object> tableExtras = new LinkedHashMap<>();
+
+            List<String> columns() { return columns; }
+
+            @Override
+            public Void visitColumnDef(OracleSQLParser.ColumnDefContext ctx) {
+                String colName = unquote(ctx.id().getText());
+                columns.add(colName);
+
+                Map<String, Object> col = new LinkedHashMap<>();
+                col.put("name", colName);
+                col.put("dataType", ctx.dataType().getText());
+
+                for (OracleSQLParser.ColumnRestContext r : ctx.columnRest()) {
+                    if (r instanceof OracleSQLParser.ColDefaultContext c) {
+                        col.put("default", c.expr().getText());
+                    } else if (r instanceof OracleSQLParser.ColDefaultOnNullContext c) {
+                        col.put("defaultOnNull", c.expr().getText());
+                    } else if (r instanceof OracleSQLParser.ColGeneratedVirtualContext c) {
+                        if (c.expr() != null) {
+                            col.put("virtualExpr", c.expr().getText());
+                        }
+                        col.put("virtual", true);
+                    } else if (r instanceof OracleSQLParser.ColIdentityAlwaysContext) {
+                        col.put("identity", "ALWAYS");
+                    } else if (r instanceof OracleSQLParser.ColIdentityByDefaultContext) {
+                        col.put("identity", "BY_DEFAULT");
+                    } else if (r instanceof OracleSQLParser.ColIdentityByDefaultOnNullContext) {
+                        col.put("identity", "BY_DEFAULT_ON_NULL");
+                    } else if (r instanceof OracleSQLParser.ColConstraintInlineContext c) {
+                        @SuppressWarnings("unchecked")
+                        List<String> cs = (List<String>) col.computeIfAbsent("constraints", k -> new ArrayList<String>());
+                        cs.add(c.getText()); // hoặc c.columnConstraint().getText()
+                    }
+                }
+                columnDetails.add(col);
+                return null;
+            }
+
+            @Override
+            public Void visitTableConstraint(OracleSQLParser.TableConstraintContext ctx) {
+                // Thu constraints mức bảng
+                tableExtras.computeIfAbsent("tableConstraints", k -> new ArrayList<String>());
+                @SuppressWarnings("unchecked")
+                List<String> cs = (List<String>) tableExtras.get("tableConstraints");
+                cs.add(ctx.getText());
+                return null;
+            }
+
+            @Override
+            public Void visitPartitionByRange(OracleSQLParser.PartitionByRangeContext ctx) {
+                Map<String, Object> p = new LinkedHashMap<>();
+                p.put("type", "RANGE");
+                p.put("key", ctx.id().getText());
+
+                List<String> parts = new ArrayList<>();
+                for (OracleSQLParser.PartitionSpecContext sp : ctx.partitionSpec()) {
+                    parts.add(sp.getText()); // có thể tách name + boundary nếu muốn chi tiết
+                }
+                p.put("partitions", parts);
+                tableExtras.put("partitioning", p);
+                return null;
+            }
         }
 
         @Override
         public MetadataDto visitStCreateGtt(OracleSQLParser.StCreateGttContext ctx) {
-            String name = text(ctx.tblName);
-            List<String> cols = ctx.getRuleContexts(OracleSQLParser.ColumnDefContext.class)
-                    .stream()
-                    .map(c -> unquote(text(c.colName)))
-                    .collect(Collectors.toList());
+            String tableName = unquote(text(ctx.qname()));
+
+            TableScanner scanner = new TableScanner();
+            scanner.visit(ctx);
 
             return MetadataDto.builder()
-                    .statementType("CREATE_GLOBAL_TEMPORARY_TABLE")
+                    .statementType("CREATE_GLOBAL_TEMP_TABLE")
                     .schemaName(null)
-                    .objectName(unquote(name))
-                    .tables(name != null ? Collections.singletonList(unquote(name)) : Collections.emptyList())
-                    .columns(cols)
-                    .build();
+                    .objectName(tableName)
+                    .tables(Collections.singletonList(tableName))
+                    .columns(scanner.columns()).build();
         }
 
         /* -------- CREATE INDEX -------- */
 
         @Override
         public MetadataDto visitStCreateIndex(OracleSQLParser.StCreateIndexContext ctx) {
-            String name = unquote(text(ctx.idxName));
+            String idxName = unquote(text(ctx.qname(0)));
+            String onTable = unquote(text(ctx.qname(1)));
+
+            List<String> cols = new ArrayList<>();
+            for (OracleSQLParser.IndexExprContext ie : ctx.indexExpr()) {
+                cols.add(ie.getText());
+            }
+
             return MetadataDto.builder()
                     .statementType("CREATE_INDEX")
                     .schemaName(null)
-                    .objectName(name)
-                    .tables(Collections.emptyList())
-                    .columns(Collections.emptyList())
+                    .objectName(idxName)
+                    .tables(Collections.singletonList(onTable))
+                    .columns(cols)
                     .build();
         }
 
@@ -212,7 +283,7 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
 
         @Override
         public MetadataDto visitStCreateMaterializedView(OracleSQLParser.StCreateMaterializedViewContext ctx) {
-            String name = unquote(text(ctx.mvName));
+            String name = unquote(text(ctx.qname()));
             QueryScanner scanner = new QueryScanner();
             scanner.visit(ctx.selectStatement());
 
@@ -224,6 +295,7 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
                     .columns(scanner.columns())
                     .build();
         }
+
 
         /* -------- Các DDL khác -------- */
 
@@ -309,11 +381,11 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
                 col = unquote(ctx.alias.getText());
             } else {
                 // Fallback: nếu expr là qname hoặc qname.DOT.id thì lấy phần cuối
-                String raw = ctx.expr.getText();
+                String raw = ctx.sel.getText();
                 // Không regex: phân tích theo cây con
                 // - Khi expr chứa qname DOT id → dùng ctx.expr subtree để tìm id cuối
                 // - Nếu không xác định được thì giữ lại raw
-                String tail = tryExtractTailIdFromExpr(ctx.expr); // viết util nhỏ, duyệt child nodes
+                String tail = tryExtractTailIdFromExpr(ctx.sel); // viết util nhỏ, duyệt child nodes
                 col = (tail != null) ? unquote(tail) : raw;
             }
             columns.add(col);
