@@ -153,7 +153,7 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
                     .schemaName(null)
                     .objectName(tableName)
                     .tables(Collections.singletonList(tableName))
-                    .columns(scanner.columns())        // tên cột
+                    .columns(scanner.columns())
                     .build();
         }
 
@@ -168,11 +168,14 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
             @Override
             public Void visitColumnDef(OracleSQLParser.ColumnDefContext ctx) {
                 String colName = unquote(ctx.id().getText());
-                columns.add(colName);
 
                 Map<String, Object> col = new LinkedHashMap<>();
                 col.put("name", colName);
-                col.put("dataType", ctx.dataType().getText());
+                if (ctx.dataType() != null && ctx.dataType().getText() != null && !ctx.dataType().getText().trim().isEmpty()) {
+                    col.put("dataType", ctx.dataType().getText());
+                    colName = colName + "(" + unquote(ctx.dataType().getText()) + ")";
+                }
+                columns.add(colName);
 
                 for (OracleSQLParser.ColumnRestContext r : ctx.columnRest()) {
                     if (r instanceof OracleSQLParser.ColDefaultContext c) {
