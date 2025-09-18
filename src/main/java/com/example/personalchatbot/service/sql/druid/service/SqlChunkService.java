@@ -7,8 +7,10 @@ import com.example.personalchatbot.service.sql.dto.MetadataDto;
 import com.example.personalchatbot.service.sql.dto.SqlChunkDto;
 import com.example.personalchatbot.service.sql.druid.implement.SqlChunkServiceImpl;
 import com.example.personalchatbot.service.sql.llm.SqlPromptService;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.NoArgsConstructor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -30,6 +32,16 @@ public class SqlChunkService implements SqlChunkServiceImpl {
     private final SqlParserRegistry registry;
     private final SqlPromptService promptService;
     private final LlmService llm;
+
+    @NoArgsConstructor
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private static class Raw {
+        public String statementType;
+        public String schemaName;
+        public String objectName;
+        public List<String> tables;
+        public List<String> columns;
+    }
 
     /* ================= Split ================= */
 
@@ -196,13 +208,6 @@ public class SqlChunkService implements SqlChunkServiceImpl {
             ObjectMapper om = new ObjectMapper()
                     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
-            class Raw {
-                public String statementType;
-                public String schemaName;
-                public String objectName;
-                public List<String> tables;
-                public List<String> columns;
-            }
             Raw r = om.readValue(json, Raw.class);
 
             String st = (r.statementType == null || r.statementType.isBlank())
