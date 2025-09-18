@@ -2,10 +2,7 @@ package com.example.personalchatbot.service.sql.druid.service;
 
 import com.alibaba.druid.DbType;
 import com.alibaba.druid.sql.SQLUtils;
-import com.alibaba.druid.sql.ast.SQLExpr;
-import com.alibaba.druid.sql.ast.SQLName;
-import com.alibaba.druid.sql.ast.SQLObject;
-import com.alibaba.druid.sql.ast.SQLStatement;
+import com.alibaba.druid.sql.ast.*;
 import com.alibaba.druid.sql.ast.expr.SQLIdentifierExpr;
 import com.alibaba.druid.sql.ast.expr.SQLPropertyExpr;
 import com.alibaba.druid.sql.ast.statement.*;
@@ -157,8 +154,11 @@ public class DruidFacade implements DruidFacadeImpl {
         QName t = qnameOf(c.getName());
         String prefix = t.object != null ? (t.object + ".") : "";
         for (SQLTableElement e : c.getTableElementList()) {
-            if (e instanceof SQLColumnDefinition) {
-                String col = safeIdentifier(((SQLColumnDefinition) e).getNameAsString());
+            if (e instanceof SQLColumnDefinition column) {
+                String col = safeIdentifier(column.getNameAsString());
+                if (column.getDataType() != null && column.getDataType().getName() != null  && !column.getDataType().getName().trim().isEmpty()) {
+                    col = col + "(" + column.getDataType().getName() + ")";
+                }
                 if (col != null) cols.add(prefix + col);
             }
         }
@@ -171,11 +171,12 @@ public class DruidFacade implements DruidFacadeImpl {
         if (items != null) {
             for (SQLSelectOrderByItem it : items) {
                 SQLExpr expr = it.getExpr();
-                String col = null;
-                if (expr instanceof SQLIdentifierExpr) col = ((SQLIdentifierExpr) expr).getName();
-                else if (expr instanceof SQLPropertyExpr) col = ((SQLPropertyExpr) expr).getName();
-                else if (expr instanceof SQLName) col = ((SQLName) expr).getSimpleName();
-                else if (expr != null) col = expr.toString();
+                String col = switch (expr) {
+                    case SQLIdentifierExpr sqlIdentifierExpr -> sqlIdentifierExpr.getName();
+                    case SQLPropertyExpr sqlPropertyExpr -> sqlPropertyExpr.getName();
+                    case SQLName sqlName -> sqlName.getSimpleName();
+                    default -> expr.toString();
+                };
                 if (col != null && !col.isEmpty()) cols.add(col);
             }
         }
