@@ -33,16 +33,6 @@ public class SqlChunkService implements SqlChunkServiceImpl {
     private final SqlPromptService promptService;
     private final LlmService llm;
 
-    @NoArgsConstructor
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    private static class Raw {
-        public String statementType;
-        public String schemaName;
-        public String objectName;
-        public List<String> tables;
-        public List<String> columns;
-    }
-
     /* ================= Split ================= */
 
     @Override
@@ -103,7 +93,7 @@ public class SqlChunkService implements SqlChunkServiceImpl {
             // 1) Druid
             try {
                 md = druid.analyze(c.getContent(), d);
-                log.info("Lấy metadata bằn Druid cho câu SQL :{}", c.getContent());
+                log.info("Lấy metadata bằng Druid cho câu SQL :{}", c.getContent());
             } catch (Exception ignore) { /* fallback */ }
 
             // 2) ANTLR
@@ -112,7 +102,7 @@ public class SqlChunkService implements SqlChunkServiceImpl {
                 if (opt.isPresent()) {
                     try {
                         md = opt.get().analyze(c.getContent());
-                        log.info("Lấy metadata bằn ANTLR 4 cho câu SQL :{}", c.getContent());
+                        log.info("Lấy metadata bằng ANTLR 4 cho câu SQL :{}", c.getContent());
                     } catch (Exception ignore) { /* fallback */ }
                 }
             }
@@ -125,7 +115,7 @@ public class SqlChunkService implements SqlChunkServiceImpl {
 
                     // 4) Gọi LLM sinh câu trả lời
                     String text = llm.generate(prompt.getSystem(), prompt.getUser());
-                    log.info("Lấy metadata bằn LLM cho câu SQL :{}", c.getContent());
+                    log.info("Lấy metadata bằng LLM cho câu SQL :{}", c.getContent());
                     md = parseLlmMetadata(text);
                 } catch (Exception e) {
                     // vẫn gán metadata RAW để không chặn cả pipeline
@@ -208,24 +198,24 @@ public class SqlChunkService implements SqlChunkServiceImpl {
             ObjectMapper om = new ObjectMapper()
                     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
-            Raw r = om.readValue(json, Raw.class);
+            MetadataDto metadata = om.readValue(json, MetadataDto.class);
 
-            String st = (r.statementType == null || r.statementType.isBlank())
-                    ? "RAW_STATEMENT" : r.statementType.trim();
-            String schema = (r.schemaName == null || r.schemaName.isBlank())
-                    ? null : r.schemaName.trim();
-            String object = (r.objectName == null || r.objectName.isBlank())
-                    ? null : r.objectName.trim();
+            String statementType = (metadata.getStatementType() == null || metadata.getStatementType().isBlank())
+                    ? "RAW_STATEMENT" : metadata.getStatementType().trim();
+            String schema = (metadata.getSchemaName() == null || metadata.getSchemaName().isBlank())
+                    ? null : metadata.getSchemaName().trim();
+            String object = (metadata.getObjectName() == null || metadata.getObjectName().isBlank())
+                    ? null : metadata.getObjectName().trim();
 
-            List<String> tables = (r.tables == null) ? Collections.emptyList()
-                    : r.tables.stream().filter(t -> t != null && !t.isBlank())
+            List<String> tables = (metadata.getTables() == null) ? Collections.emptyList()
+                    : metadata.getTables().stream().filter(table -> table != null && !table.isBlank())
                     .map(String::trim).toList();
-            List<String> columns = (r.columns == null) ? Collections.emptyList()
-                    : r.columns.stream().filter(t -> t != null && !t.isBlank())
+            List<String> columns = (metadata.getColumns() == null) ? Collections.emptyList()
+                    : metadata.getColumns().stream().filter(column -> column != null && !column.isBlank())
                     .map(String::trim).toList();
 
             return MetadataDto.builder()
-                    .statementType(st)
+                    .statementType(statementType)
                     .schemaName(schema)
                     .objectName(object)
                     .tables(new ArrayList<>(tables))
