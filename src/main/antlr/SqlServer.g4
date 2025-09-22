@@ -256,12 +256,17 @@ createFunctionStatement
 paramDefList : paramDef (COMMA paramDef)* ;
 paramDef     : AT_ID? identifier dataType ;
 returnType   : dataType | TABLE ;
-funcBody : ( . )+? stopBeforeTerminator ;
+funcBody : blobUntilGoOrEof ;
 
 /* --- CREATE PROCEDURE (opaque body, ôm GO) --- */
 createProcedureStatement
-  : CREATE PROCEDURE schemaQualifiedName (LPAREN procParamList? RPAREN)? AS procBody goTerminator+  #CreateProcWithGo
-  | CREATE PROCEDURE schemaQualifiedName (LPAREN procParamList? RPAREN)? AS procBody                #CreateProcNoGo
+  : CREATE PROCEDURE schemaQualifiedName procParams? AS procBody goTerminator+  #CreateProcWithGo
+  | CREATE PROCEDURE schemaQualifiedName procParams? AS procBody                #CreateProcNoGo
+  ;
+
+procParams
+  : LPAREN procParamList? RPAREN
+  | procParamList
   ;
 
 procParamList : procParam (COMMA procParam)* ;
@@ -284,7 +289,7 @@ createTriggerStatement
 triggerTiming
   : AFTER (INSERT | UPDATE | DELETE) (COMMA (INSERT|UPDATE|DELETE))*
   ;
-trgBody : ( . )+? stopBeforeTerminator ;
+trgBody  : blobUntilGoOrEof ;
 
 /* --- CREATE SYNONYM --- */
 createSynonymStatement
