@@ -23,15 +23,18 @@ public class SqlServerSqlParser implements AntlrSqlParserImpl {
         return "sqlserver";
     }
 
+
     /* ===================== split ===================== */
     @Override
     public List<SqlChunkDto> split(@NonNull String script) {
         SqlServerLexer lexer = new SqlServerLexer(CharStreams.fromString(script));
         SqlServerParser parser = new SqlServerParser(new CommonTokenStream(lexer));
+
         parser.removeErrorListeners();
         lexer.removeErrorListeners();
-        parser.addErrorListener(new SilentErrorListener());
-        lexer.addErrorListener(new SilentErrorListener());
+        SilentErrorListener sil = new SilentErrorListener();
+        parser.addErrorListener(sil);
+        lexer.addErrorListener(sil);
 
         SqlServerParser.ScriptContext root = parser.script();
 
@@ -42,74 +45,80 @@ public class SqlServerSqlParser implements AntlrSqlParserImpl {
             ParseTree child = root.getChild(i);
             if (!(child instanceof SqlServerParser.TopStmtContext top)) continue;
 
-            SqlChunkDto dto;
-
             // ---- 4 loại Programmability đứng top-level ----
-            if (top instanceof SqlServerParser.TopProcContext tp) {
-                String fqn = fqnOfProcedure(tp.createProcedureStatement());
+            SqlServerParser.CreateProcedureStatementContext cProc =
+                    getFirst(top, SqlServerParser.CreateProcedureStatementContext.class);
+            if (cProc != null) {
+                String fqn = fqnOfProcedure(cProc);
+                List<String> params = extractProcParams(cProc);
                 MetadataDto md = MetadataDto.builder()
                         .statementType("CREATE_PROCEDURE")
                         .schemaName(extractSchema(fqn))
-                        .objectName(extractName(fqn))
+                        .objectName(extractObject(fqn))
+                        .columns(params.isEmpty() ? null : params)
                         .build();
-                dto = buildChunk(idx++, dialect(), md.getStatementType(),
-                        slice(top, script), md);
-                out.add(dto);
+                out.add(buildChunk(idx++, dialect(), md.getStatementType(), slice(top, script), md));
                 continue;
             }
 
-            if (top instanceof SqlServerParser.TopFuncContext tf) {
-                String fqn = fqnOfFunction(tf.createFunctionStatement());
+            SqlServerParser.CreateFunctionStatementContext cFunc =
+                    getFirst(top, SqlServerParser.CreateFunctionStatementContext.class);
+            if (cFunc != null) {
+                String fqn = fqnOfFunction(cFunc);
+                List<String> params = extractFuncParams(cFunc);
                 MetadataDto md = MetadataDto.builder()
                         .statementType("CREATE_FUNCTION")
                         .schemaName(extractSchema(fqn))
-                        .objectName(extractName(fqn))
+                        .objectName(extractObject(fqn))
+                        .columns(params.isEmpty() ? null : params)
                         .build();
-                dto = buildChunk(idx++, dialect(), md.getStatementType(),
-                        slice(top, script), md);
-                out.add(dto);
+                out.add(buildChunk(idx++, dialect(), md.getStatementType(), slice(top, script), md));
                 continue;
             }
 
-            if (top instanceof SqlServerParser.TopViewContext tv) {
-                String fqn = fqnOfView(tv.createViewStatement());
+            SqlServerParser.CreateViewStatementContext cView =
+                    getFirst(top, SqlServerParser.CreateViewStatementContext.class);
+            if (cView != null) {
+                String fqn = fqnOfView(cView);
                 MetadataDto md = MetadataDto.builder()
                         .statementType("CREATE_VIEW")
                         .schemaName(extractSchema(fqn))
-                        .objectName(extractName(fqn))
+                        .objectName(extractObject(fqn))
                         .build();
-                dto = buildChunk(idx++, dialect(), md.getStatementType(),
-                        slice(top, script), md);
-                out.add(dto);
+                out.add(buildChunk(idx++, dialect(), md.getStatementType(), slice(top, script), md));
                 continue;
             }
 
-            if (top instanceof SqlServerParser.TopTrigContext tt) {
-                String trg = fqnOfTrigger(tt.createTriggerStatement());
-                String onTbl = fqnOfTriggerTarget(tt.createTriggerStatement());
+            SqlServerParser.CreateTriggerStatementContext cTrig =
+                    getFirst(top, SqlServerParser.CreateTriggerStatementContext.class);
+            if (cTrig != null) {
+                String trg = fqnOfTrigger(cTrig);
+                String onTbl = fqnOfTriggerTarget(cTrig);
+
+                List<String> tables = (onTbl == null || onTbl.isBlank())
+                        ? Collections.emptyList()
+                        : Collections.singletonList(stripQuotes(onTbl));
+
                 MetadataDto md = MetadataDto.builder()
                         .statementType("CREATE_TRIGGER")
                         .schemaName(extractSchema(trg))
-                        .objectName(extractName(trg))
-                        .tables(Collections.singletonList(stripQuotes(onTbl)))
+                        .objectName(extractObject(trg))
+                        .tables(tables)
                         .build();
-                dto = buildChunk(idx++, dialect(), md.getStatementType(),
-                        slice(top, script), md);
-                out.add(dto);
+
+                out.add(buildChunk(idx++, dialect(), md.getStatementType(), slice(top, script), md));
                 continue;
             }
 
-            // ---- Các câu lệnh thường nằm trong s=sqlStatement ----
-            SqlServerParser.SqlStatementContext st = null;
-            if (top instanceof SqlServerParser.TopWithTerminatorContext tw) st = tw.s;
-            else if (top instanceof SqlServerParser.TopNoGoContext tn)      st = tn.s;
+            // ---- Các câu lệnh thường: s=sqlStatement ----
+            SqlServerParser.SqlStatementContext st =
+                    getFirst(top, SqlServerParser.SqlStatementContext.class);
             if (st == null) continue;
 
             String content = slice(top, script);
             MetadataDto md = analyzeByNode(st);
             String kind = (md != null && md.getStatementType() != null) ? md.getStatementType() : "RAW_STATEMENT";
-            dto = buildChunk(idx++, dialect(), kind, content, md);
-            out.add(dto);
+            out.add(buildChunk(idx++, dialect(), kind, content, md));
         }
         return out;
     }
@@ -134,112 +143,147 @@ public class SqlServerSqlParser implements AntlrSqlParserImpl {
                 : MetadataDto.minimal(list.getFirst().getKind());
     }
 
-    /* ======================== Per-statement metadata ======================== */
+    /* ======================== Per-statement metadata (sqlStatement) ======================== */
     private MetadataDto analyzeByNode(SqlServerParser.SqlStatementContext ctx) {
         if (ctx == null) return MetadataDto.minimal("RAW_STATEMENT");
 
-        if (ctx instanceof SqlServerParser.StCreateTableContext st) {
-            String fqn = textOf(st.createTableStatement().schemaQualifiedName());
+        // CREATE TABLE
+        SqlServerParser.CreateTableStatementContext ct =
+                getFirst(ctx, SqlServerParser.CreateTableStatementContext.class);
+        if (ct != null) {
+            String fqn = textOf(ct.schemaQualifiedName());
             return MetadataDto.builder().statementType("CREATE_TABLE")
-                    .schemaName(extractSchema(fqn)).objectName(extractName(fqn)).build();
+                    .schemaName(extractSchema(fqn)).objectName(extractObject(fqn)).build();
         }
 
-        if (ctx instanceof SqlServerParser.StCreateIndexContext st) {
-            var c = st.createIndexStatement();
-            String idx = textOf(c.identifier(0));
-            String tbl = textOf(c.schemaQualifiedName());
+        // CREATE INDEX
+        SqlServerParser.CreateIndexStatementContext cidx =
+                getFirst(ctx, SqlServerParser.CreateIndexStatementContext.class);
+        if (cidx != null) {
+            String idxName = textOf(cidx.identifier(0));
+            String tbl = textOf(cidx.schemaQualifiedName());
             return MetadataDto.builder().statementType("CREATE_INDEX")
                     .schemaName(extractSchema(tbl))
-                    .objectName(stripQuotes(idx))
+                    .objectName(stripQuotes(idxName))
                     .tables(Collections.singletonList(stripQuotes(tbl)))
                     .build();
         }
 
-        if (ctx instanceof SqlServerParser.StAlterIndexContext st) {
-            var c = st.alterIndexStatement();
-            String tbl = textOf(c.schemaQualifiedName());
-            String idx = (c.ALL() != null) ? "ALL" : textOf(c.identifier());
+        // ALTER INDEX
+        SqlServerParser.AlterIndexStatementContext caidx =
+                getFirst(ctx, SqlServerParser.AlterIndexStatementContext.class);
+        if (caidx != null) {
+            String tbl = textOf(caidx.schemaQualifiedName());
+            String idxName = (caidx.ALL() != null) ? "ALL" : textOf(caidx.identifier());
             return MetadataDto.builder().statementType("ALTER_INDEX")
-                    .objectName(stripQuotes(idx))
+                    .objectName(stripQuotes(idxName))
                     .tables(Collections.singletonList(stripQuotes(tbl)))
                     .build();
         }
 
-        if (ctx instanceof SqlServerParser.StCreateSequenceContext st) {
-            String fqn = textOf(st.createSequenceStatement().schemaQualifiedName());
+        // CREATE SEQUENCE
+        SqlServerParser.CreateSequenceStatementContext cseq =
+                getFirst(ctx, SqlServerParser.CreateSequenceStatementContext.class);
+        if (cseq != null) {
+            String fqn = textOf(cseq.schemaQualifiedName());
             return MetadataDto.builder().statementType("CREATE_SEQUENCE")
-                    .schemaName(extractSchema(fqn)).objectName(extractName(fqn)).build();
+                    .schemaName(extractSchema(fqn)).objectName(extractObject(fqn)).build();
         }
 
-        if (ctx instanceof SqlServerParser.StCreateTypeContext st) {
-            String fqn = textOf(st.createTypeStatement().schemaQualifiedName());
+        // CREATE TYPE
+        SqlServerParser.CreateTypeStatementContext ctype =
+                getFirst(ctx, SqlServerParser.CreateTypeStatementContext.class);
+        if (ctype != null) {
+            String fqn = textOf(ctype.schemaQualifiedName());
             return MetadataDto.builder().statementType("CREATE_TYPE")
-                    .schemaName(extractSchema(fqn)).objectName(extractName(fqn)).build();
+                    .schemaName(extractSchema(fqn)).objectName(extractObject(fqn)).build();
         }
 
-        if (ctx instanceof SqlServerParser.StCreateSchemaContext st) {
-            String sch = stripQuotes(textOf(st.createSchemaStatement().schemaName()));
+        // CREATE SCHEMA
+        SqlServerParser.CreateSchemaStatementContext csch =
+                getFirst(ctx, SqlServerParser.CreateSchemaStatementContext.class);
+        if (csch != null) {
+            String sch = stripQuotes(textOf(csch.schemaName()));
             return MetadataDto.builder().statementType("CREATE_SCHEMA")
                     .schemaName(sch).objectName(sch).build();
         }
 
-        if (ctx instanceof SqlServerParser.StCreateDatabaseContext st) {
-            String db = textOf(st.createDatabaseStatement().getChild(2));
+        // CREATE DATABASE
+        SqlServerParser.CreateDatabaseStatementContext cdb =
+                getFirst(ctx, SqlServerParser.CreateDatabaseStatementContext.class);
+        if (cdb != null) {
+            String db = textOf(cdb.getChild(2));
             return MetadataDto.builder().statementType("CREATE_DATABASE")
                     .objectName(stripQuotes(db)).build();
         }
 
-        if (ctx instanceof SqlServerParser.StAlterDatabaseContext st) {
-            String db = textOf(st.alterDatabaseStatement().getChild(2));
+        // ALTER DATABASE
+        SqlServerParser.AlterDatabaseStatementContext cadb =
+                getFirst(ctx, SqlServerParser.AlterDatabaseStatementContext.class);
+        if (cadb != null) {
+            String db = textOf(cadb.getChild(2));
             return MetadataDto.builder().statementType("ALTER_DATABASE")
                     .objectName(stripQuotes(db)).build();
         }
 
-        if (ctx instanceof SqlServerParser.StDropIndexContext st) {
-            var c = st.dropIndexStatement();
-            String idx = textOf(c.getChild(2));
-            String tbl = textOf(c.schemaQualifiedName());
+        // DROP INDEX
+        SqlServerParser.DropIndexStatementContext cdidx =
+                getFirst(ctx, SqlServerParser.DropIndexStatementContext.class);
+        if (cdidx != null) {
+            // grammar: DROP INDEX (IDENTIFIER | BRACKET_ID | DOUBLE_QUOTED_ID) ON schemaQualifiedName
+            String idxName = textOf(cdidx.getChild(2)); // giữ như cũ, vì nhánh là tokens/ids
+            String tbl = textOf(cdidx.schemaQualifiedName());
             return MetadataDto.builder().statementType("DROP_INDEX")
-                    .objectName(stripQuotes(idx))
+                    .objectName(stripQuotes(idxName))
                     .tables(Collections.singletonList(stripQuotes(tbl)))
                     .build();
         }
 
-        if (ctx instanceof SqlServerParser.StDropContext st) {
-            String obj = textOf(st.dropStatement().schemaQualifiedName());
+        // DROP (DATABASE | TABLE | VIEW | FUNCTION | PROCEDURE | TRIGGER | SEQUENCE | TYPE | SYNONYM) schemaQualifiedName
+        SqlServerParser.DropStatementContext cdrop =
+                getFirst(ctx, SqlServerParser.DropStatementContext.class);
+        if (cdrop != null) {
+            String obj = textOf(cdrop.schemaQualifiedName());
             return MetadataDto.builder().statementType("DROP")
                     .objectName(stripQuotes(obj)).build();
         }
 
-        if (ctx instanceof SqlServerParser.StAlterTableContext st) {
-            String fqn = textOf(st.alterTableStatement().schemaQualifiedName());
+        // ALTER TABLE
+        SqlServerParser.AlterTableStatementContext calt =
+                getFirst(ctx, SqlServerParser.AlterTableStatementContext.class);
+        if (calt != null) {
+            String fqn = textOf(calt.schemaQualifiedName());
             return MetadataDto.builder().statementType("ALTER_TABLE")
-                    .schemaName(extractSchema(fqn)).objectName(extractName(fqn)).build();
+                    .schemaName(extractSchema(fqn)).objectName(extractObject(fqn)).build();
         }
 
-        if (ctx instanceof SqlServerParser.StUseContext st) {
-            String db = textOf(st.useStatement().getChild(1));
+        // USE
+        SqlServerParser.UseStatementContext cuse =
+                getFirst(ctx, SqlServerParser.UseStatementContext.class);
+        if (cuse != null) {
+            String db = textOf(cuse.getChild(1));
             return MetadataDto.builder().statementType("USE").objectName(stripQuotes(db)).build();
         }
 
-        if (ctx instanceof SqlServerParser.StSetContext)      return MetadataDto.builder().statementType("SET").build();
-        if (ctx instanceof SqlServerParser.StExecContext)     return MetadataDto.builder().statementType("EXEC").build();
-        if (ctx instanceof SqlServerParser.StPrintContext)    return MetadataDto.builder().statementType("PRINT").build();
-        if (ctx instanceof SqlServerParser.StIfContext)       return MetadataDto.builder().statementType("IF").build();
-        if (ctx instanceof SqlServerParser.StMergeContext)    return MetadataDto.builder().statementType("MERGE").build();
-        if (ctx instanceof SqlServerParser.StSelectContext)   return MetadataDto.builder().statementType("SELECT").build();
-        if (ctx instanceof SqlServerParser.StInsertContext)   return MetadataDto.builder().statementType("INSERT").build();
-        if (ctx instanceof SqlServerParser.StUpdateContext)   return MetadataDto.builder().statementType("UPDATE").build();
-        if (ctx instanceof SqlServerParser.StDeleteContext)   return MetadataDto.builder().statementType("DELETE").build();
-        if (ctx instanceof SqlServerParser.StThrowContext)    return MetadataDto.builder().statementType("THROW").build();
+        // Các loại đơn giản còn lại theo presence
+        if (has(ctx, SqlServerParser.SetStatementContext.class))    return MetadataDto.builder().statementType("SET").build();
+        if (has(ctx, SqlServerParser.ExecStatementContext.class))   return MetadataDto.builder().statementType("EXEC").build();
+        if (has(ctx, SqlServerParser.PrintStatementContext.class))  return MetadataDto.builder().statementType("PRINT").build();
+        if (has(ctx, SqlServerParser.IfStatementContext.class))     return MetadataDto.builder().statementType("IF").build();
+        if (has(ctx, SqlServerParser.MergeStmtContext.class))       return MetadataDto.builder().statementType("MERGE").build();
+        if (has(ctx, SqlServerParser.SelectStmtContext.class))      return MetadataDto.builder().statementType("SELECT").build();
+        if (has(ctx, SqlServerParser.InsertStmtContext.class))      return MetadataDto.builder().statementType("INSERT").build();
+        if (has(ctx, SqlServerParser.UpdateStmtContext.class))      return MetadataDto.builder().statementType("UPDATE").build();
+        if (has(ctx, SqlServerParser.DeleteStmtContext.class))      return MetadataDto.builder().statementType("DELETE").build();
+        if (has(ctx, SqlServerParser.ThrowStatementContext.class))  return MetadataDto.builder().statementType("THROW").build();
 
         return MetadataDto.minimal("RAW_STATEMENT");
     }
 
-    /* -------------------- helpers cho labeled alts -------------------- */
+    /* -------------------- helpers: labeled alts / rule access -------------------- */
     private static String fqnOfView(SqlServerParser.CreateViewStatementContext c) {
-        if (c instanceof SqlServerParser.CreateViewWithGoContext v) return textOf(v.schemaQualifiedName());
-        if (c instanceof SqlServerParser.CreateViewNoGoContext v)   return textOf(v.schemaQualifiedName());
+        if (c instanceof SqlServerParser.CreateViewWithGoContext x) return textOf(x.schemaQualifiedName());
+        if (c instanceof SqlServerParser.CreateViewNoGoContext x)   return textOf(x.schemaQualifiedName());
         return null;
     }
 
@@ -258,39 +302,148 @@ public class SqlServerSqlParser implements AntlrSqlParserImpl {
     }
 
     private static String fqnOfTrigger(SqlServerParser.CreateTriggerStatementContext c) {
-        if (c instanceof SqlServerParser.CreateTriggerWithGoContext x) return textOf(x.schemaQualifiedName(0));
-        if (c instanceof SqlServerParser.CreateTriggerNoGoContext x)   return textOf(x.schemaQualifiedName(0));
+        if (c instanceof SqlServerParser.CreateDmlTriggerWithGoContext x) return textOf(x.schemaQualifiedName(0));
+        if (c instanceof SqlServerParser.CreateDmlTriggerNoGoContext   x) return textOf(x.schemaQualifiedName(0));
+        if (c instanceof SqlServerParser.CreateDdlTriggerWithGoContext x) return textOf(x.schemaQualifiedName());
+        if (c instanceof SqlServerParser.CreateDdlTriggerNoGoContext   x) return textOf(x.schemaQualifiedName());
         return null;
     }
 
     private static String fqnOfTriggerTarget(SqlServerParser.CreateTriggerStatementContext c) {
-        if (c instanceof SqlServerParser.CreateTriggerWithGoContext x) return textOf(x.schemaQualifiedName(1));
-        if (c instanceof SqlServerParser.CreateTriggerNoGoContext x)   return textOf(x.schemaQualifiedName(1));
+        if (c instanceof SqlServerParser.CreateDmlTriggerWithGoContext x) return textOf(x.schemaQualifiedName(1));
+        if (c instanceof SqlServerParser.CreateDmlTriggerNoGoContext   x) return textOf(x.schemaQualifiedName(1));
+        if (c instanceof SqlServerParser.CreateDdlTriggerWithGoContext) return null;
+        if (c instanceof SqlServerParser.CreateDdlTriggerNoGoContext)   return null;
         return null;
     }
 
-    /* ======================== Parse helpers ======================== */
-    private static String textOf(ParseTree t) { return (t == null) ? null : t.getText(); }
+    /* -------------------- helpers: extract params from grammar -------------------- */
+    private static List<String> extractProcParams(SqlServerParser.CreateProcedureStatementContext c) {
+        List<String> out = new ArrayList<>();
+        SqlServerParser.ProcParamsContext pp = null;
+        if (c instanceof SqlServerParser.CreateProcWithGoContext x) pp = x.procParams();
+        if (c instanceof SqlServerParser.CreateProcNoGoContext x)   pp = x.procParams();
+        if (pp == null) return out;
 
-    private static String extractSchema(String fqn) {
-        if (fqn == null) return null;
-        int i = fqn.indexOf('.');
-        if (i < 0) return null;
-        return stripQuotes(fqn.substring(0, i));
+        SqlServerParser.ProcParamListContext list = pp.procParamList();
+        if (list == null) return out;
+
+        for (SqlServerParser.ProcParamContext p : list.procParam()) {
+            String name = p.AT_ID() != null ? p.AT_ID().getText()
+                    : (p.identifier() != null ? p.identifier().getText() : null);
+            if (name != null) out.add(name);
+        }
+        return out;
     }
 
-    private static String extractName(String fqn) {
-        if (fqn == null) return null;
-        int i = fqn.indexOf('.');
-        String name = (i < 0) ? fqn : fqn.substring(i + 1);
-        return stripQuotes(name);
+    private static List<String> extractFuncParams(SqlServerParser.CreateFunctionStatementContext c) {
+        List<String> out = new ArrayList<>();
+        SqlServerParser.ParamDefListContext list = null;
+        if (c instanceof SqlServerParser.CreateFuncScalarWithGoContext x) list = x.paramDefList();
+        if (c instanceof SqlServerParser.CreateFuncScalarNoGoContext x)   list = x.paramDefList();
+        if (c instanceof SqlServerParser.CreateFuncInlineWithGoContext x) list = x.paramDefList();
+        if (c instanceof SqlServerParser.CreateFuncInlineNoGoContext x)   list = x.paramDefList();
+        if (list == null) return out;
+
+        for (SqlServerParser.ParamDefContext p : list.paramDef()) {
+            String name = p.AT_ID() != null ? p.AT_ID().getText()
+                    : (p.identifier() != null ? p.identifier().getText() : null);
+            if (name != null) out.add(name);
+        }
+        return out;
+    }
+
+    /* ======================== Parse helpers ======================== */
+
+    private static <T extends ParserRuleContext> T getFirst(ParserRuleContext ctx, Class<T> klass) {
+        List<T> ls = ctx.getRuleContexts(klass);
+        return ls.isEmpty() ? null : ls.getFirst();
+    }
+
+    private static <T extends ParserRuleContext> boolean has(ParserRuleContext ctx, Class<T> klass) {
+        return !ctx.getRuleContexts(klass).isEmpty();
+    }
+
+    private static String textOf(ParseTree t) { return (t == null) ? null : t.getText(); }
+
+    /** Split a multipart name by DOT, respecting [] and "" quoting. */
+    private static List<String> splitQualifiedName(String fqn) {
+        List<String> parts = new ArrayList<>();
+        if (fqn == null) return parts;
+
+        StringBuilder cur = new StringBuilder();
+        boolean inBrackets = false;
+        boolean inDQuotes  = false;
+
+        for (int i = 0; i < fqn.length(); i++) {
+            char c = fqn.charAt(i);
+
+            if (inBrackets) {
+                if (c == ']') {
+                    if (i + 1 < fqn.length() && fqn.charAt(i + 1) == ']') { cur.append(']'); i++; }
+                    else { inBrackets = false; }
+                } else cur.append(c);
+                continue;
+            }
+
+            if (inDQuotes) {
+                if (c == '"') {
+                    if (i + 1 < fqn.length() && fqn.charAt(i + 1) == '"') { cur.append('"'); i++; }
+                    else { inDQuotes = false; }
+                } else cur.append(c);
+                continue;
+            }
+
+            if (c == '[') { inBrackets = true; continue; }
+            if (c == '"') { inDQuotes  = true; continue; }
+
+            if (c == '.') { parts.add(cur.toString()); cur.setLength(0); }
+            else { cur.append(c); }
+        }
+        parts.add(cur.toString());
+        return parts;
+    }
+
+    private static String stripDelimiters(String s) {
+        if (s == null) return null;
+        if (s.length() >= 2 && s.charAt(0) == '[' && s.charAt(s.length() - 1) == ']') {
+            return s.substring(1, s.length() - 1);
+        }
+        if (s.length() >= 2 && s.charAt(0) == '"' && s.charAt(s.length() - 1) == '"') {
+            return s.substring(1, s.length() - 1);
+        }
+        return s;
+    }
+
+    private static String extractObject(String fqn) {
+        List<String> parts = splitQualifiedName(fqn);
+        if (parts.isEmpty()) return null;
+        return stripDelimiters(parts.getLast());
+    }
+
+    private static String extractSchema(String fqn) {
+        List<String> parts = splitQualifiedName(fqn);
+        if (parts.size() < 2) return null;
+        return stripDelimiters(parts.get(parts.size() - 2));
+    }
+
+    @SuppressWarnings("unused")
+    private static String extractDatabase(String fqn) {
+        List<String> parts = splitQualifiedName(fqn);
+        return (parts.size() >= 3) ? stripDelimiters(parts.get(parts.size() - 3)) : null;
+    }
+
+    @SuppressWarnings("unused")
+    private static String extractServer(String fqn) {
+        List<String> parts = splitQualifiedName(fqn);
+        return (parts.size() >= 4) ? stripDelimiters(parts.get(parts.size() - 4)) : null;
     }
 
     private static String stripQuotes(String s) {
         if (s == null) return null;
         String x = s;
-        if (x.startsWith("[") && x.endsWith("]")) x = x.substring(1, x.length() - 1);
-        if (x.startsWith("\"") && x.endsWith("\"")) x = x.substring(1, x.length() - 1);
+        if (x.length() >= 2 && x.startsWith("[") && x.endsWith("]")) x = x.substring(1, x.length() - 1);
+        if (x.length() >= 2 && x.startsWith("\"") && x.endsWith("\"")) x = x.substring(1, x.length() - 1);
         return x;
     }
 
