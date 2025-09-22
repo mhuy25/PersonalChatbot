@@ -52,6 +52,7 @@ qualifiedName       : identifier (DOT identifier)? ;
 sqlStatement
   : createDatabaseStatement
   | useStatement
+  | dropProcedureStatement
   | dropStatement
   | createSchemaStatement
   | createTypeStatement
@@ -146,6 +147,7 @@ columnConstraintBody
 dataType
   : (qualifiedName | identifier) (LPAREN INTEGER (COMMA INTEGER)? RPAREN)?
   ;
+
 columnList      : LPAREN identifier (COMMA identifier)* RPAREN ;
 tableOptions    : WITH LPAREN ( . )*? RPAREN ;
 anyExpr         : LPAREN ( anyExpr | ( . ) )*? RPAREN ;
@@ -203,15 +205,59 @@ funcBody         : blobUntilGoOrEof ;
 
 /* ============================== PROCEDURE (opaque body, includes GO) ============================== */
 createProcedureStatement
-  : CREATE PROCEDURE schemaQualifiedName procParams? AS procBody goTerminator+  #CreateProcWithGo
-  | CREATE PROCEDURE schemaQualifiedName procParams? AS procBody                #CreateProcNoGo
+  : CREATE (OR ALTER)? PROCEDURE schemaQualifiedName
+    procParams?
+    procOptionClause?
+    AS
+    procBody
+    goTerminator+                                #CreateProcWithGo
+  | CREATE (OR ALTER)? PROCEDURE schemaQualifiedName
+    procParams?
+    procOptionClause?
+    AS
+    procBody                                     #CreateProcNoGo
+  ;
+
+dropProcedureStatement
+  : DROP PROCEDURE (IF EXISTS)? schemaQualifiedName (COMMA schemaQualifiedName)*
+  ;
+
+// WITH (ENCRYPTION, RECOMPILE, EXECUTE AS ...)
+procOptionClause
+  : WITH procOptionList
+  ;
+procOptionList
+  : procOption (COMMA procOption)*
+  ;
+procOption
+  : ENCRYPTION
+  | RECOMPILE
+  | EXECUTE AS (CALLER | SELF | OWNER | STRING | NSTRING | identifier)
   ;
 procParams       : LPAREN procParamList? RPAREN | procParamList ;
 procParamList    : procParam (COMMA procParam)* ;
+// An toàn: T-SQL yêu cầu tên @param → ưu tiên AT_ID; cho phép bắt buộc AT_ID để giảm noise
 procParam
-  : (AT_ID | identifier) dataType (READONLY)? (EQ defaultValue)?
+  : AT_ID dataType procParamAttr* (EQ defaultValue)?
   ;
-defaultValue     : STRING | INTEGER | DECIMAL_LIT | NULLX ;
+// Các thuộc tính phổ biến: READONLY (TVP), OUTPUT/OUT, VARYING (tồn tại trên SQL cổ hơn/ODBC)
+procParamAttr
+  : READONLY
+  | OUTPUT
+  | OUT
+  | VARYING
+  ;
+// DEFAULT phong phú: số âm/dương, chuỗi N'...', hàm, NULL/DEFAULT
+defaultValue
+  : sign? INTEGER
+  | sign? DECIMAL_LIT
+  | STRING
+  | NSTRING
+  | NULLX
+  | identifier          // cho các hằng/builtin
+  | functionCall
+  ;
+sign : PLUS | MINUS ;
 procBody
   : (
       { _input.LA(1) != GO_STMT && _input.LA(1) != IntStream.EOF }?
@@ -348,6 +394,16 @@ TRANSACTION : T R A N S A C T I O N;
 COMMIT : C O M M I T;
 ROLLBACK : R O L L B A C K;
 READONLY: R E A D O N L Y;
+OUTPUT: O U T P U T;
+OUT: O U T;
+VARYING: V A R Y I N G;
+ENCRYPTION: E N C R Y P T I O N;
+RECOMPILE: R E C O M P I L E;
+EXECUTE: E X E C U T E;
+CALLER: C A L L E R;
+SELF: S E L F;
+OWNER: O W N E R;
+EXISTS : E X I S T S;
 
 SEMI:';'; LPAREN:'(' ; RPAREN:')' ; COMMA:',' ; DOT:'.' ;
 CONCAT:'||'; PLUS:'+'; MINUS:'-'; STAR:'*'; SLASH:'/'; PERCENT:'%'; CARET:'^';

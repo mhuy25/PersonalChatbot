@@ -239,6 +239,18 @@ public class SqlServerSqlParser implements AntlrSqlParserImpl {
                     .build();
         }
 
+        // DROP PROCEDURE
+        SqlServerParser.DropProcedureStatementContext dp =
+                getFirst(ctx, SqlServerParser.DropProcedureStatementContext.class);
+        if (dp != null) {
+            String first = dp.schemaQualifiedName(0) != null ? textOf(dp.schemaQualifiedName(0)) : null;
+            return MetadataDto.builder()
+                    .statementType("DROP_PROCEDURE")
+                    .schemaName(extractSchema(first))
+                    .objectName(extractObject(first))
+                    .build();
+        }
+
         // DROP (DATABASE | TABLE | VIEW | FUNCTION | PROCEDURE | TRIGGER | SEQUENCE | TYPE | SYNONYM) schemaQualifiedName
         SqlServerParser.DropStatementContext cdrop =
                 getFirst(ctx, SqlServerParser.DropStatementContext.class);
@@ -329,9 +341,7 @@ public class SqlServerSqlParser implements AntlrSqlParserImpl {
         if (list == null) return out;
 
         for (SqlServerParser.ProcParamContext p : list.procParam()) {
-            String name = p.AT_ID() != null ? p.AT_ID().getText()
-                    : (p.identifier() != null ? p.identifier().getText() : null);
-            if (name != null) out.add(name);
+            if (p.AT_ID() != null) out.add(p.AT_ID().getText());
         }
         return out;
     }
