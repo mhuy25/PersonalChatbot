@@ -2,6 +2,15 @@ grammar OracleSQL;
 
 @header {
 package com.example.personalchatbot.service.sql.antlr.oracle;
+import org.antlr.v4.runtime.IntStream;
+}
+
+@lexer::members {
+  private boolean atLineStartAfterWs() {
+    int i = -1, la = _input.LA(i);
+    while (la == ' ' || la == '\t') { i--; la = _input.LA(i); }
+    return la == '\n' || la == '\r' || la == IntStream.EOF;
+  }
 }
 
 /* ============================== Parser rules ============================== */
@@ -28,8 +37,8 @@ sqlStatement
     | stOther
     ;
 
-/* ---------- CREATE TABLE & GTT: bắt danh sách cột ---------- */
-
+/* ====================== SQL STATEMENTS ====================== */
+/* ---------- CREATE TABLE & GTT ---------- */
 stCreateTable
   : CREATE TABLE qname LPAREN tableElement (COMMA tableElement)* RPAREN
     (partitionByRange)?
@@ -45,7 +54,6 @@ onCommitClause
   : ON COMMIT (PRESERVE ROWS | DELETE ROWS)
   ;
 
-/** Một phần tử trong () của CREATE TABLE */
 tableElement
   : columnDef
   | tableConstraint
@@ -71,18 +79,31 @@ constraintInline
   ;
 
 columnConstraint
-  : NOT NULL
-  | NULL
-  | UNIQUE
-  | PRIMARY KEY
-  | CHECK LPAREN expr RPAREN
-  | REFERENCES qname fkRefRest?
+  : ( NOT NULL
+    | NULL
+    | UNIQUE
+    | PRIMARY KEY
+    | CHECK LPAREN expr RPAREN
+    | REFERENCES qname fkRefRest?
+    ) constraintOptions?
   ;
-
 
 fkRefRest
   : LPAREN id (COMMA id)* RPAREN onDeleteClause? deferrableClause?
-  | onDeleteClause? deferrableClause
+  | onDeleteClause deferrableClause?
+  | deferrableClause
+  ;
+
+constraintOption
+  : usingIndex
+  | enableClause
+  | validateClause
+  | relyClause
+  | deferrableClause
+  ;
+
+constraintOptions
+  : constraintOption+
   ;
 
 onDeleteClause
@@ -90,16 +111,24 @@ onDeleteClause
   ;
 
 deferrableClause
-  : DEFERRABLE (INITIALLY (DEFERRED | IMMEDIATE))?
+  : ( NOT )? DEFERRABLE ( INITIALLY ( DEFERRED | IMMEDIATE ) )?
+  ;
+
+enableClause   : ( ENABLE | DISABLE ) ;
+
+validateClause : ( VALIDATE | NOVALIDATE ) ;
+
+relyClause     : ( RELY | NORELY ) ;
+
+usingIndex
+  : USING INDEX ( qname )? ( LPAREN ( . )*? RPAREN )?
   ;
 
 tableConstraint
-  : CONSTRAINT id? (
-        PRIMARY KEY LPAREN id (COMMA id)* RPAREN
-      | UNIQUE LPAREN id (COMMA id)* RPAREN
-      | CHECK LPAREN expr RPAREN
-      | FOREIGN KEY LPAREN id (COMMA id)* RPAREN REFERENCES qname fkRefRest?
-    )
+  : (CONSTRAINT id?)? ( PRIMARY KEY LPAREN id (COMMA id)* RPAREN
+  | UNIQUE LPAREN id (COMMA id)* RPAREN
+  | CHECK LPAREN expr RPAREN
+  | FOREIGN KEY LPAREN id (COMMA id)* RPAREN REFERENCES qname fkRefRest?) constraintOptions?
   ;
 
 partitionByRange
@@ -107,83 +136,8 @@ partitionByRange
   ;
 
 partitionSpec
-  : PARTITION id VALUES LESS THAN LPAREN (DATE_ literal | MAXVALUE) RPAREN
+  : PARTITION id VALUES LESS THAN LPAREN ( DATE_ STRING | MAXVALUE ) RPAREN
   ;
-
-/* ====================== LITERALS ====================== */
-literal
-    : STRING                         #strLiteral
-    | DECIMAL                        #decLiteral
-    | INT                            #intLiteral
-    | DATE_ STRING                   #dateKeywordLiteral          // DATE 'YYYY-MM-DD'
-    | TIMESTAMP STRING               #timestampKeywordLiteral     // TIMESTAMP 'YYYY-MM-DD HH24:MI:SS' (để nguyên chuỗi)
-    | NULL                          #nullLiteral
-    ;
-
-/* ====================== DATATYPE ====================== */
-/* Đủ dùng cho script: NUMBER, VARCHAR2, CHAR, DATE, TIMESTAMP */
-dataType
-    : NUMBER ( LPAREN INT ( COMMA INT )? RPAREN )?                                 #dtNumber
-    | VARCHAR2 LPAREN INT ( COMMA INT )? RPAREN                                    #dtVarchar2
-    | CHAR LPAREN INT RPAREN                                                       #dtChar
-    | DATE_                                                                        #dtDate
-    | TIMESTAMP ( LPAREN INT RPAREN )? ( WITH ( LOCAL )? TIME ZONE )?              #dtTimestamp
-    ;
-
-/* ====================== EXPRESSIONS ====================== */
-/* Tiền lệ ưu tiên tối thiểu để chịu được DEFAULT/CHECK/VIRTUAL/SELECT list */
-expr
-    : logicalExpr
-    ;
-
-logicalExpr
-    : comparisonExpr ( ( AND | OR ) comparisonExpr )*
-    ;
-
-comparisonExpr
-  : concatExpr
-    ( (EQUAL | NEQ1 | NEQ2 | LT | LE | GT | GE) concatExpr
-    | IS (NOT)? NULL
-    | IN LPAREN expr (COMMA expr)* RPAREN
-    )?
-  ;
-
-concatExpr
-    : addExpr ( CONCAT addExpr )*
-    ;
-
-addExpr
-    : multExpr ( (PLUS | MINUS) multExpr )*
-    ;
-
-multExpr
-    : unaryExpr ( (STAR | SLASH) unaryExpr )*
-    ;
-
-unaryExpr
-    : (PLUS | MINUS | NOT)? primaryExpr
-    ;
-
-primaryExpr
-    : literal
-    | qname                               // cột/tên bảng/func không tham số cũng chịu được
-    | functionCall
-    | LPAREN expr RPAREN
-    | bindVar                             // :NEW, :OLD, :x
-    ;
-
-functionCall
-    : qname LPAREN ( expr ( COMMA expr )* )? RPAREN
-    ;
-
-bindVar
-    : COLON (IDENTIFIER | QUOTED_IDENTIFIER)
-    ;
-
-/** Ngoặc lồng nhau dùng đệ quy */
-parens
-    :   LPAREN ( parens | ~(LPAREN | RPAREN) )* RPAREN
-    ;
 
 /* ---------- CREATE INDEX ---------- */
 stCreateIndex
@@ -195,14 +149,14 @@ indexExpr
   : expr
   ;
 
-/* ---------- CREATE VIEW: lấy selectList & FROM/JOIN ---------- */
+/* ---------- CREATE VIEW ---------- */
 stCreateView
     :   CREATE ( OR REPLACE )? ( FORCE )? VIEW viewName=qname AS
         selectStatement
         terminatorSemi
     ;
 
-/* ---------- CREATE MATERIALIZED VIEW: lấy selectList & FROM/JOIN ---------- */
+/* ---------- CREATE MATERIALIZED VIEW ---------- */
 stCreateMaterializedView
   : CREATE MATERIALIZED VIEW qname
     buildClause?
@@ -220,7 +174,7 @@ refreshClause
     (ON (DEMAND | COMMIT))?
   ;
 
-/* ---------- SELECT (tối giản, đủ lấy cột & bảng nguồn) ---------- */
+/* ---------- SELECT ---------- */
 selectStatement
     :   SELECT ( DISTINCT | ALL )? selectList fromClause selectTail?
     ;
@@ -238,7 +192,7 @@ selectItem
     ;
 
 selectExpr
-    :   ( parens | ~(COMMA | FROM | SEMI | SLASH) )+
+    :   ( parens | ~(COMMA | FROM | SEMI) )+
     ;
 
 fromClause
@@ -258,7 +212,7 @@ joinCond
     ;
 
 joinExpr
-    :   ( parens | ~(JOIN | WHERE | GROUP | HAVING | ORDER | UNION | SEMI | SLASH) )*
+    :   ( parens | ~(JOIN | WHERE | GROUP | HAVING | ORDER | UNION | SEMI) )*
     ;
 
 /* ---------- CREATE SEQUENCE / SYNONYM (đơn giản) ---------- */
@@ -267,8 +221,8 @@ stCreateSequence
     ;
 
 stCreateSynonym
-    :   CREATE ( OR REPLACE )? SYNONYM synName=id FOR qname terminatorSemi
-    ;
+  : CREATE ( OR REPLACE )? ( PUBLIC )? SYNONYM synName=id FOR qname terminatorSemi
+  ;
 
 /* ---------- CREATE TRIGGER / PACKAGE / PROCEDURE ---------- */
 stCreateTrigger
@@ -317,8 +271,12 @@ stCreateProcedure
 
 /* ---------- COMMENT ---------- */
 stComment
-    :   COMMENT ON ( TABLE qname | COLUMN qname DOT id ) IS stringLiteral terminatorSemi
-    ;
+  : COMMENT ON ( TABLE qname
+  | COLUMN qname DOT id
+  | INDEX qname
+  | VIEW qname
+  | MATERIALIZED VIEW qname ) IS stringLiteral terminatorSemi
+  ;
 
 /* ---------- ALTER SESSION ---------- */
 stAlterSession
@@ -330,27 +288,100 @@ stAnonymousBlock
     :   BEGIN ( . )*? END terminatorSemi? slashTerm
     ;
 
-/* ---------- Fallback cho statement khác (để vẫn split được) ---------- */
+/* ---------- Other Statement ---------- */
 stOther
     :   ( . )*? ( terminatorSemi | slashTerm )
     ;
 
-/* ---------- Helpers ---------- */
+/* ====================== EXPRESSIONS ====================== */
+expr
+    : logicalExpr
+    ;
+
+logicalExpr
+    : comparisonExpr ( ( AND | OR ) comparisonExpr )*
+    ;
+
+comparisonExpr
+  : concatExpr
+    ( (EQUAL | NEQ1 | NEQ2 | LT | LE | GT | GE) concatExpr
+    | IS (NOT)? NULL
+    | IN LPAREN expr (COMMA expr)* RPAREN
+    )?
+  ;
+
+concatExpr
+    : addExpr ( CONCAT addExpr )*
+    ;
+
+addExpr
+    : multExpr ( (PLUS | MINUS) multExpr )*
+    ;
+
+multExpr     : unaryExpr ( (STAR | DIV) unaryExpr )* ;
+
+unaryExpr
+    : (PLUS | MINUS | NOT)? primaryExpr
+    ;
+
+primaryExpr
+    : literal
+    | qname
+    | functionCall
+    | LPAREN expr RPAREN
+    | bindVar
+    ;
+
+functionCall
+    : qname LPAREN ( expr ( COMMA expr )* )? RPAREN
+    ;
+
+bindVar
+    : COLON (IDENTIFIER | QUOTED_IDENTIFIER)
+    ;
+
+parens
+    :   LPAREN ( parens | ~(LPAREN | RPAREN) )* RPAREN
+    ;
+
+/* ====================== LITERALS ====================== */
+literal
+    : STRING                         #strLiteral
+    | DECIMAL                        #decLiteral
+    | INT                            #intLiteral
+    | DATE_ STRING                   #dateKeywordLiteral          // DATE 'YYYY-MM-DD'
+    | TIMESTAMP STRING               #timestampKeywordLiteral     // TIMESTAMP 'YYYY-MM-DD HH24:MI:SS'
+    | NULL                          #nullLiteral
+    ;
+
+/* ====================== DATATYPE ====================== */
+dataType
+  : NUMBER ( LPAREN INT ( COMMA INT )? RPAREN )?
+  | VARCHAR2 LPAREN INT ( COMMA INT )? RPAREN ( BYTE | CHAR )?
+  | CHAR LPAREN INT RPAREN ( BYTE | CHAR )?
+  | DATE_
+  | TIMESTAMP ( LPAREN INT RPAREN )? ( WITH ( LOCAL )? TIME ZONE )?
+  | CLOB | NCLOB | BLOB
+  | RAW ( LPAREN INT RPAREN )?
+  | NCHAR LPAREN INT RPAREN
+  | NVARCHAR2 LPAREN INT RPAREN
+  ;
+
+/* ==================== Common helpers ==================== */
 terminatorSemi : SEMI ;
-slashTerm      : SLASH ;
+slashTerm    : SLASH_TERM ;
 qname          : id ( DOT id )* ;
 id             : IDENTIFIER | QUOTED_IDENTIFIER ;
 stringLiteral  : STRING ;
 
 /* ============================== Lexer rules ============================== */
 
-// ======= Operators & symbols (add these) =======
+// ======= Operators & symbols =======
 CONCAT      : '||' ;
 NEQ2        : '<>' ;
 NEQ1        : '!=' ;
 LE          : '<=' ;
 GE          : '>=' ;
-
 EQUAL       : '=' ;
 LT          : '<' ;
 GT          : '>' ;
@@ -360,80 +391,79 @@ STAR        : '*' ;
 PERCENT     : '%' ;
 COLON       : ':' ;
 PIPE        : '|' ;
+LPAREN      : '(' ;
+RPAREN      : ')' ;
+COMMA       : ',' ;
+DOT         : '.' ;
+SEMI        : ';' ;
+SLASH_TERM : {atLineStartAfterWs()}? '/' [ \t]* ( '\r'? '\n' | EOF ) ;
+DIV        : '/' ;
 
-// ======= Numbers (đủ dùng cho DDL) =======
+// ======= Numbers =======
 INT         : [0-9]+ ;
 DECIMAL     : [0-9]+ '.' [0-9]+ ;
 
-/* Ký hiệu */
-LPAREN  : '(' ;
-RPAREN  : ')' ;
-COMMA   : ',' ;
-DOT     : '.' ;
-SEMI    : ';' ;
-SLASH   : '/' ;
-
 /* Keywords (uppercase) */
-CREATE  : 'CREATE' ;
-OR      : 'OR' ;
-REPLACE : 'REPLACE' ;
-FORCE   : 'FORCE' ;
-TABLE   : 'TABLE' ;
-GLOBAL  : 'GLOBAL' ;
-TEMPORARY : 'TEMPORARY' ;
-INDEX   : 'INDEX' ;
-BITMAP  : 'BITMAP' ;
-VIEW    : 'VIEW' ;
+CREATE      : 'CREATE' ;
+OR          : 'OR' ;
+REPLACE     : 'REPLACE' ;
+FORCE       : 'FORCE' ;
+TABLE       : 'TABLE' ;
+GLOBAL      : 'GLOBAL' ;
+TEMPORARY   : 'TEMPORARY' ;
+INDEX       : 'INDEX' ;
+BITMAP      : 'BITMAP' ;
+VIEW        : 'VIEW' ;
 MATERIALIZED : 'MATERIALIZED' ;
-SEQUENCE: 'SEQUENCE' ;
-SYNONYM : 'SYNONYM' ;
-TRIGGER : 'TRIGGER' ;
-PACKAGE : 'PACKAGE' ;
-BODY    : 'BODY' ;
-PROCEDURE : 'PROCEDURE' ;
-AS      : 'AS' ;
-IS      : 'IS' ;
-BEGIN   : 'BEGIN' ;
-END     : 'END' ;
-COMMENT : 'COMMENT' ;
-ON      : 'ON' ;
-COLUMN  : 'COLUMN' ;
-ALTER   : 'ALTER' ;
-SESSION : 'SESSION' ;
-SET     : 'SET' ;
-SELECT  : 'SELECT' ;
-DISTINCT: 'DISTINCT' ;
-ALL     : 'ALL' ;
-FROM    : 'FROM' ;
-WHERE   : 'WHERE' ;
-GROUP   : 'GROUP' ;
-BY      : 'BY' ;
-HAVING  : 'HAVING' ;
-ORDER   : 'ORDER' ;
-JOIN    : 'JOIN' ;
-LEFT    : 'LEFT' ;
-RIGHT   : 'RIGHT' ;
-FULL    : 'FULL' ;
-INNER   : 'INNER' ;
-OUTER   : 'OUTER' ;
-UNION   : 'UNION' ;
-BUILD   : 'BUILD' ;
-IMMEDIATE : 'IMMEDIATE' ;
-REFRESH : 'REFRESH' ;
-COMPLETE: 'COMPLETE' ;
-DEMAND  : 'DEMAND' ;
-FUNCTION: 'FUNCTION' ;
-RETURN  : 'RETURN' ;
-FOR     : 'FOR' ;
-ALWAYS  : 'ALWAYS' ;
-DEFAULT : 'DEFAULT' ;
-NULL   : 'NULL' ;
-VIRTUAL : 'VIRTUAL' ;
-GENERATED : 'GENERATED' ;
-IDENTITY : 'IDENTITY';
-DEFERRABLE : 'DEFERRABLE';
-INITIALLY : 'INITIALLY';
-DEFERRED : 'DEFERRED';
+SEQUENCE    : 'SEQUENCE' ;
+SYNONYM     : 'SYNONYM' ;
+TRIGGER     : 'TRIGGER' ;
+PACKAGE     : 'PACKAGE' ;
+BODY        : 'BODY' ;
+PROCEDURE   : 'PROCEDURE' ;
+AS          : 'AS' ;
+IS          : 'IS' ;
+BEGIN       : 'BEGIN' ;
+END         : 'END' ;
+COMMENT     : 'COMMENT' ;
+ON          : 'ON' ;
+COLUMN      : 'COLUMN' ;
+ALTER       : 'ALTER' ;
+SESSION     : 'SESSION' ;
+SET         : 'SET' ;
+SELECT      : 'SELECT' ;
+DISTINCT    : 'DISTINCT' ;
+ALL         : 'ALL' ;
+FROM        : 'FROM' ;
+WHERE       : 'WHERE' ;
+GROUP       : 'GROUP' ;
+BY          : 'BY' ;
+HAVING      : 'HAVING' ;
+ORDER       : 'ORDER' ;
+JOIN        : 'JOIN' ;
+LEFT        : 'LEFT' ;
+RIGHT       : 'RIGHT' ;
+FULL        : 'FULL' ;
+INNER       : 'INNER' ;
+OUTER       : 'OUTER' ;
+UNION       : 'UNION' ;
+BUILD       : 'BUILD' ;
+IMMEDIATE   : 'IMMEDIATE' ;
+REFRESH     : 'REFRESH' ;
+COMPLETE    : 'COMPLETE' ;
+DEMAND      : 'DEMAND' ;
+FUNCTION    : 'FUNCTION' ;
+RETURN      : 'RETURN' ;
+FOR         : 'FOR' ;
+ALWAYS      : 'ALWAYS' ;
+DEFAULT     : 'DEFAULT' ;
+NULL        : 'NULL' ;
+VIRTUAL     : 'VIRTUAL' ;
+GENERATED   : 'GENERATED' ;
+IDENTITY    : 'IDENTITY';
+DEFERRABLE  : 'DEFERRABLE';
+INITIALLY   : 'INITIALLY';
+DEFERRED    : 'DEFERRED';
 NOT         : 'NOT' ;
 AND         : 'AND' ;
 PRIMARY     : 'PRIMARY' ;
@@ -460,11 +490,27 @@ CHAR        : 'CHAR' ;
 NUMBER      : 'NUMBER' ;
 COMMIT      : 'COMMIT' ;
 PRESERVE    : 'PRESERVE' ;
-ROWS    : 'ROWS' ;
-DELETE  : 'DELETE';
-FAST    : 'FAST' ;
-IN      : 'IN' ;
-CASCADE : 'CASCADE' ;
+ROWS        : 'ROWS' ;
+DELETE      : 'DELETE';
+FAST        : 'FAST' ;
+IN          : 'IN' ;
+CASCADE     : 'CASCADE' ;
+PUBLIC      : 'PUBLIC';
+BYTE        : 'BYTE';
+CLOB        : 'CLOB';
+NCLOB       : 'NCLOB';
+BLOB        : 'BLOB';
+RAW         : 'RAW';
+NCHAR       : 'NCHAR';
+NVARCHAR2   : 'NVARCHAR2';
+ENABLE      : 'ENABLE';
+DISABLE     : 'DISABLE';
+VALIDATE    : 'VALIDATE';
+NOVALIDATE  : 'NOVALIDATE';
+RELY        : 'RELY';
+NORELY      : 'NORELY';
+USING       : 'USING';
+
 
 /* Identifier & literal */
 QUOTED_IDENTIFIER

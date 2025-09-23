@@ -1,6 +1,7 @@
 package com.example.personalchatbot.service.sql.antlr.oracle;
 
 import com.example.personalchatbot.service.sql.antlr.implement.AntlrSqlParserImpl;
+import com.example.personalchatbot.service.sql.dto.CaseChangingCharStream;
 import com.example.personalchatbot.service.sql.dto.MetadataDto;
 import com.example.personalchatbot.service.sql.dto.SqlChunkDto;
 import lombok.NonNull;
@@ -25,20 +26,18 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
     }
 
     /* --------------------- Split --------------------- */
-
-    /** Cắt script thành các câu lệnh dựa vào rule sql/sqlStatement. */
     @Override
     public List<SqlChunkDto> split(@NonNull String script) {
         OracleSQLParser.SqlContext root = parseSql(script);
         List<SqlChunkDto> chunks = new ArrayList<>();
 
         int i = 0;
-        for (OracleSQLParser.SqlStatementContext st : root.sqlStatement()) {
-            Interval interval = intervalOf(st);
+        for (OracleSQLParser.SqlStatementContext statement : root.sqlStatement()) {
+            Interval interval = intervalOf(statement);
             String text = slice(script, interval).trim();
 
-            MetadataDto md = analyzeByNode(st);
-            String kind = md != null && md.getStatementType() != null ? md.getStatementType() : "RAW_STATEMENT";
+            MetadataDto metadata = analyzeByNode(statement);
+            String kind = metadata != null && metadata.getStatementType() != null ? metadata.getStatementType() : "RAW_STATEMENT";
 
             SqlChunkDto dto = SqlChunkDto.builder()
                     .index(i++)
@@ -46,10 +45,10 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
                     .totalParts(1)
                     .dialect(dialect())
                     .kind(kind)
-                    .schemaName(md != null ? md.getSchemaName() : null)
-                    .objectName(md != null ? md.getObjectName() : null)
+                    .schemaName(metadata != null ? metadata.getSchemaName() : null)
+                    .objectName(metadata != null ? metadata.getObjectName() : null)
                     .content(text)
-                    .metadata(md)
+                    .metadata(metadata)
                     .metadataJson(null)
                     .build();
             chunks.add(dto);
@@ -57,7 +56,6 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
         return chunks;
     }
 
-    /** Phân tích DUY NHẤT một câu lệnh. */
     @Override
     public MetadataDto analyze(@NonNull String singleStatement) {
         OracleSQLParser p = newParser(singleStatement);
@@ -68,6 +66,16 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
 
     /* ===================== ANTLR bootstrap ===================== */
 
+    //--------------- Lấy schemaName/objectName -----------------
+    private static String[] splitQname(OracleSQLParser.QnameContext q) {
+        if (q == null) return new String[]{null, null};
+        List<OracleSQLParser.IdContext> ids = q.id();
+        if (ids == null || ids.isEmpty()) return new String[]{null, null};
+        String obj = unquote(ids.getLast().getText());
+        String schema = (ids.size() > 1) ? unquote(ids.getFirst().getText()) : null;
+        return new String[]{schema, obj};
+    }
+
     private OracleSQLParser.SqlContext parseSql(String text) {
         OracleSQLParser parser = newParser(text);
         return parser.sql();
@@ -75,7 +83,7 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
 
     private OracleSQLParser newParser(String text) {
         CharStream cs = CharStreams.fromString(text);
-        OracleSQLLexer lexer = new OracleSQLLexer(cs);
+        OracleSQLLexer lexer = new OracleSQLLexer(new CaseChangingCharStream(cs, true));
         CommonTokenStream tokens = new CommonTokenStream(lexer);
         OracleSQLParser parser = new OracleSQLParser(tokens);
         parser.removeErrorListeners();
@@ -118,7 +126,6 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
         return new AstVisitor().visit(st);
     }
 
-    /** Visitor gọn nhẹ để trích statementType/objectName/tables/columns. */
     private static class AstVisitor extends OracleSQLBaseVisitor<MetadataDto> {
 
         @Override
@@ -144,20 +151,20 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
 
         @Override
         public MetadataDto visitStCreateTable(OracleSQLParser.StCreateTableContext ctx) {
-            String tableName = unquote(text(ctx.qname()));
+            String[] so = splitQname(ctx.qname());
+            String schemaName = so[0], objectName = so[1];
             TableScanner scanner = new TableScanner();
-            scanner.visit(ctx); // duyệt toàn bộ subtree
+            scanner.visit(ctx);
 
             return MetadataDto.builder()
                     .statementType("CREATE_TABLE")
-                    .schemaName(null)
-                    .objectName(tableName)
-                    .tables(Collections.singletonList(tableName))
+                    .schemaName(schemaName)
+                    .objectName(objectName)
+                    .tables(Collections.singletonList(objectName))
                     .columns(scanner.columns())
                     .build();
         }
 
-        // ---- Scanner con cho CREATE TABLE ----
         private static class TableScanner extends OracleSQLBaseVisitor<Void> {
             private final List<String> columns = new ArrayList<>();
             private final List<Map<String, Object>> columnDetails = new ArrayList<>();
@@ -196,7 +203,7 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
                     } else if (r instanceof OracleSQLParser.ColConstraintInlineContext c) {
                         @SuppressWarnings("unchecked")
                         List<String> cs = (List<String>) col.computeIfAbsent("constraints", k -> new ArrayList<String>());
-                        cs.add(c.getText()); // hoặc c.columnConstraint().getText()
+                        cs.add(c.getText());
                     }
                 }
                 columnDetails.add(col);
@@ -205,7 +212,6 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
 
             @Override
             public Void visitTableConstraint(OracleSQLParser.TableConstraintContext ctx) {
-                // Thu constraints mức bảng
                 tableExtras.computeIfAbsent("tableConstraints", k -> new ArrayList<String>());
                 @SuppressWarnings("unchecked")
                 List<String> cs = (List<String>) tableExtras.get("tableConstraints");
@@ -221,7 +227,7 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
 
                 List<String> parts = new ArrayList<>();
                 for (OracleSQLParser.PartitionSpecContext sp : ctx.partitionSpec()) {
-                    parts.add(sp.getText()); // có thể tách name + boundary nếu muốn chi tiết
+                    parts.add(sp.getText());
                 }
                 p.put("partitions", parts);
                 tableExtras.put("partitioning", p);
@@ -231,16 +237,16 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
 
         @Override
         public MetadataDto visitStCreateGtt(OracleSQLParser.StCreateGttContext ctx) {
-            String tableName = unquote(text(ctx.qname()));
-
+            String[] so = splitQname(ctx.qname());
+            String schemaName = so[0], objectName = so[1];
             TableScanner scanner = new TableScanner();
             scanner.visit(ctx);
 
             return MetadataDto.builder()
                     .statementType("CREATE_GLOBAL_TEMP_TABLE")
-                    .schemaName(null)
-                    .objectName(tableName)
-                    .tables(Collections.singletonList(tableName))
+                    .schemaName(schemaName)
+                    .objectName(objectName)
+                    .tables(Collections.singletonList(objectName))
                     .columns(scanner.columns()).build();
         }
 
@@ -248,9 +254,9 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
 
         @Override
         public MetadataDto visitStCreateIndex(OracleSQLParser.StCreateIndexContext ctx) {
-            String idxName = unquote(text(ctx.qname(0)));
+            String[] so = splitQname(ctx.qname(0));
             String onTable = unquote(text(ctx.qname(1)));
-
+            String schemaName = so[0], objectName = so[1];
             List<String> cols = new ArrayList<>();
             for (OracleSQLParser.IndexExprContext ie : ctx.indexExpr()) {
                 cols.add(ie.getText());
@@ -258,8 +264,8 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
 
             return MetadataDto.builder()
                     .statementType("CREATE_INDEX")
-                    .schemaName(null)
-                    .objectName(idxName)
+                    .schemaName(schemaName)
+                    .objectName(objectName)
                     .tables(Collections.singletonList(onTable))
                     .columns(cols)
                     .build();
@@ -269,14 +275,15 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
 
         @Override
         public MetadataDto visitStCreateView(OracleSQLParser.StCreateViewContext ctx) {
-            String name = unquote(text(ctx.viewName));
+            String[] so = splitQname(ctx.viewName);
+            String schemaName = so[0], objectName = so[1];
             QueryScanner scanner = new QueryScanner();
             scanner.visit(ctx.selectStatement());
 
             return MetadataDto.builder()
                     .statementType("CREATE_VIEW")
-                    .schemaName(null)
-                    .objectName(name)
+                    .schemaName(schemaName)
+                    .objectName(objectName)
                     .tables(scanner.tables())
                     .columns(scanner.columns())
                     .build();
@@ -286,21 +293,22 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
 
         @Override
         public MetadataDto visitStCreateMaterializedView(OracleSQLParser.StCreateMaterializedViewContext ctx) {
-            String name = unquote(text(ctx.qname()));
+            String[] so = splitQname(ctx.qname());
+            String schemaName = so[0], objectName = so[1];
             QueryScanner scanner = new QueryScanner();
             scanner.visit(ctx.selectStatement());
 
             return MetadataDto.builder()
                     .statementType("CREATE_MATERIALIZED_VIEW")
-                    .schemaName(null)
-                    .objectName(name)
+                    .schemaName(schemaName)
+                    .objectName(objectName)
                     .tables(scanner.tables())
                     .columns(scanner.columns())
                     .build();
         }
 
 
-        /* -------- Các DDL khác -------- */
+        /* -------- Other DDL -------- */
 
         @Override
         public MetadataDto visitStCreateSequence(OracleSQLParser.StCreateSequenceContext ctx) {
@@ -369,7 +377,6 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
         }
     }
 
-    /** Scanner con để gom bảng & cột trong SELECT (dùng cho VIEW/MVIEW). */
     private static class QueryScanner extends OracleSQLBaseVisitor<Void> {
         private final LinkedHashSet<String> tables = new LinkedHashSet<>();
         private final List<String> columns = new ArrayList<>();
@@ -383,12 +390,8 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
             if (ctx.alias != null) {
                 col = unquote(ctx.alias.getText());
             } else {
-                // Fallback: nếu expr là qname hoặc qname.DOT.id thì lấy phần cuối
                 String raw = ctx.sel.getText();
-                // Không regex: phân tích theo cây con
-                // - Khi expr chứa qname DOT id → dùng ctx.expr subtree để tìm id cuối
-                // - Nếu không xác định được thì giữ lại raw
-                String tail = tryExtractTailIdFromExpr(ctx.sel); // viết util nhỏ, duyệt child nodes
+                String tail = tryExtractTailIdFromExpr(ctx.sel);
                 col = (tail != null) ? unquote(tail) : raw;
             }
             columns.add(col);
@@ -405,31 +408,27 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
 
         @Override
         public Void visitSelectStatement(OracleSQLParser.SelectStatementContext ctx) {
-            return super.visitSelectStatement(ctx); // duyệt children
+            return super.visitSelectStatement(ctx);
         }
 
-        // duyệt subtree: nếu có qname DOT id → trả về id; nếu chỉ qname → trả qname
-        // nếu không tìm được, return null.
-        // (Sử dụng getRuleContexts / getChild để lần dấu id cuối cùng)
         private String tryExtractTailIdFromExpr(OracleSQLParser.SelectExprContext expr) {
             List<TerminalNode> ids = expr.getTokens(OracleSQLParser.IDENTIFIER);
             if (ids != null && !ids.isEmpty()) {
                 return ids.getLast().getText();
             }
-            List<TerminalNode> qids = expr.getTokens(OracleSQLParser.QUOTED_IDENTIFIER);
-            if (qids != null && !qids.isEmpty()) {
-                return qids.getLast().getText();
+            List<TerminalNode> quotedId = expr.getTokens(OracleSQLParser.QUOTED_IDENTIFIER);
+            if (quotedId != null && !quotedId.isEmpty()) {
+                return quotedId.getLast().getText();
             }
             return null;
         }
     }
 
-    /** Listener im lặng để không throw exception khi gặp lỗi cú pháp. */
     private static class SilentErrorListener extends BaseErrorListener {
         @Override
         public void syntaxError(Recognizer<?, ?> recognizer, Object offendingSymbol,
                                 int line, int charPositionInLine, String msg, RecognitionException e) {
-            // no-op
+            log.info("ANTLR 4 xử lý dòng {} lỗi: {}", line, msg);
         }
     }
 }

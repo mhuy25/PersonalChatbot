@@ -7,10 +7,8 @@ import com.example.personalchatbot.service.sql.dto.MetadataDto;
 import com.example.personalchatbot.service.sql.dto.SqlChunkDto;
 import com.example.personalchatbot.service.sql.druid.implement.SqlChunkServiceImpl;
 import com.example.personalchatbot.service.sql.llm.SqlPromptService;
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.NoArgsConstructor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -38,47 +36,52 @@ public class SqlChunkService implements SqlChunkServiceImpl {
     @Override
     public List<SqlChunkDto> split(String sql, String dialect) {
         final String d = norm(dialect);
-
-        // 1) try Druid
-        try {
-            List<String> parts = druid.split(sql, d);
-            log.info("Split bằng Druid");
-            List<SqlChunkDto> chunks = new ArrayList<>(parts.size());
-            int idx = 0;
-            for (String p : parts) {
-                if (p == null || p.trim().isEmpty()) continue;
-                chunks.add(SqlChunkDto.builder()
-                        .index(idx++)
-                        .part(1)
-                        .totalParts(1)
-                        .dialect(d)
-                        .kind(null)                 // sẽ fill ở bước analyze
-                        .content(p)
-                        .build());
-            }
-            if (!chunks.isEmpty()) return chunks;
-        } catch (Exception ignore) {
-            // fallback xuống ANTLR
+        if (d.equals("mongodb")) {
+            log.info("Split bằng MongoDB Java Driver");
+            return null;
         }
-
-        // 2) fallback ANTLR theo dialect
-        AntlrSqlParserImpl antlr = registry.antlrFor(d).orElse(null);
-        if (antlr == null) {
-            throw new UnsupportedOperationException("No ANTLR parser for dialect: " + dialect);
-        }
-        try {
-            List<SqlChunkDto> chunks = antlr.split(sql);
-            log.info("Split bằng ANTLR 4");
-            // đảm bảo index liên tục
-            int i = 0;
-            for (SqlChunkDto c : chunks) {
-                c.setIndex(i++);
-                c.setDialect(d);
+        else {
+            // 1) try Druid
+            try {
+                List<String> parts = druid.split(sql, d);
+                log.info("Split bằng Druid");
+                List<SqlChunkDto> chunks = new ArrayList<>(parts.size());
+                int idx = 0;
+                for (String p : parts) {
+                    if (p == null || p.trim().isEmpty()) continue;
+                    chunks.add(SqlChunkDto.builder()
+                            .index(idx++)
+                            .part(1)
+                            .totalParts(1)
+                            .dialect(d)
+                            .kind(null)                 // sẽ fill ở bước analyze
+                            .content(p)
+                            .build());
+                }
+                if (!chunks.isEmpty()) return chunks;
+            } catch (Exception ignore) {
+                // fallback xuống ANTLR
             }
-            return chunks;
-        } catch (Exception e) {
-            // 3) hết fallback cho split
-            throw new RuntimeException("Split failed after Druid & ANTLR: " + e.getMessage(), e);
+
+            // 2) fallback ANTLR theo dialect
+            AntlrSqlParserImpl antlr = registry.antlrFor(d).orElse(null);
+            if (antlr == null) {
+                throw new UnsupportedOperationException("No ANTLR parser for dialect: " + dialect);
+            }
+            try {
+                List<SqlChunkDto> chunks = antlr.split(sql);
+                log.info("Split bằng ANTLR 4");
+                // đảm bảo index liên tục
+                int i = 0;
+                for (SqlChunkDto c : chunks) {
+                    c.setIndex(i++);
+                    c.setDialect(d);
+                }
+                return chunks;
+            } catch (Exception e) {
+                // 3) hết fallback cho split
+                throw new RuntimeException("Split failed after Druid & ANTLR: " + e.getMessage(), e);
+            }
         }
     }
 

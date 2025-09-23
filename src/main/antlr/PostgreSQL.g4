@@ -4,39 +4,55 @@ grammar PostgreSQL;
 package com.example.personalchatbot.service.sql.antlr.postgres;
 }
 
-/* ======================= Entry ======================= */
+/* ============================== Parser rules ============================== */
 sqlStatements
     : (sqlStatement semi?)* EOF
     ;
 
-semi : ';' ;
+semi  : SEMI ;
 
 sqlStatement
     : createSchemaStatement
     | createTableStatement
     | createIndexStatement
     | createViewStatement
+    | createMaterializedViewStatement
     | createFunctionStatement
     | createProcedureStatement
     | doStatement
     | createTriggerStatement
     | createTypeEnumStatement
+    | createTypeCompositeStatement
     | createExtensionStatement
     | createDomainStatement
+    | createSequenceStatement
     | createPolicyStatement
     | commentOnStatement
     ;
 
-/* ======================= CREATE SCHEMA ======================= */
+/* ====================== SQL STATEMENTS ====================== */
+/* ---------- CREATE SCHEMA ---------- */
 createSchemaStatement
-    : CREATE SCHEMA qualifiedName
+    : CREATE SCHEMA (IF NOT EXISTS)?
+      ( qualifiedName (AUTHORIZATION identifier)?
+    | AUTHORIZATION identifier )
     ;
 
-/* ======================= CREATE TABLE ======================= */
+/* ---------- CREATE TABLE ---------- */
 createTableStatement
-    : CREATE (TEMPORARY | TEMP)? UNLOGGED? TABLE (IF NOT? EXISTS)? tableName=qualifiedName
+    : CREATE (TEMPORARY | TEMP)? UNLOGGED? TABLE (IF NOT EXISTS)? tableName=qualifiedName
       '(' tableElement (',' tableElement)* ')'
+      ( tableWithClause | tableTablespaceClause | tablePartitionClause )*
     ;
+
+tableWithClause
+    : WITH '(' ( . )*? ')';
+
+tableTablespaceClause
+    : TABLESPACE identifier;
+
+tablePartitionClause
+    : PARTITION BY ( . )*?;
 
 tableElement
     : columnDefinition
@@ -51,27 +67,41 @@ optColumnConstraints
     : columnConstraint*
     ;
 
-// tightened, không có nhánh rỗng
 columnConstraint
     : NULL
     | NOT NULL
-    | DEFAULT literal
+    | DEFAULT expr
+    | CHECK '(' booleanExpr ')'
     | PRIMARY KEY
     | UNIQUE
-    | REFERENCES refTable=qualifiedName ('(' refColumnList ')')?
-        (ON DELETE fkAction)?
-        (ON UPDATE fkAction)?
+    | GENERATED (ALWAYS | BY DEFAULT) AS IDENTITY identityOptions?
+    | REFERENCES refTable=qualifiedName ('(' refColumnList ')')? refConstraintTail?
+    ;
+
+identityOptions
+    : '(' ( . )*? ')'
     ;
 
 tableConstraint
     : (CONSTRAINT identifier)? (
-          PRIMARY KEY '(' columnNameList ')'
-        | UNIQUE '(' columnNameList ')'
-        | FOREIGN? KEY '(' columnNameList ')'
-          REFERENCES refTable=qualifiedName ('(' refColumnList ')')?
-          (ON DELETE fkAction)? (ON UPDATE fkAction)?
-      )
+      PRIMARY KEY '(' columnNameList ')'
+    | UNIQUE '(' columnNameList ')'
+    | FOREIGN KEY '(' columnNameList ')'
+      REFERENCES refTable=qualifiedName ('(' refColumnList ')')? refConstraintTail?
+    )
     ;
+
+
+matchClause     : MATCH ( FULL | SIMPLE | PARTIAL ) ;
+
+fkActions
+    : (ON DELETE fkAction (ON UPDATE fkAction)?)
+    | (ON UPDATE fkAction (ON DELETE fkAction)?)
+    ;
+
+deferrableClause: ( NOT )? DEFERRABLE ( INITIALLY ( DEFERRED | IMMEDIATE ) )? ;
+
+notValidClause  : NOT VALID ;
 
 fkAction
     : CASCADE
@@ -81,34 +111,226 @@ fkAction
     | SET DEFAULT
     ;
 
+refConstraintTail
+    : ( matchClause | fkActions | deferrableClause | notValidClause )+
+    ;
+
 refColumnList   : identifier (',' identifier)* ;
+
 columnNameList  : identifier (',' identifier)* ;
 
-dataType       : identifier typeModifiers? arrayType? ;
-typeModifiers  : '(' INTEGER (',' INTEGER)? ')' ;
-arrayType      : '[' ']' ;
-
-/* ======================= CREATE INDEX ======================= */
+/* ---------- CREATE INDEX ---------- */
 createIndexStatement
-    : CREATE UNIQUE? INDEX (IF NOT? EXISTS)? indexName=qualifiedName
-      ON tableName=qualifiedName
+    : CREATE UNIQUE? (CONCURRENTLY)? INDEX (IF NOT EXISTS)? indexName=qualifiedName
+      ON (ONLY)? tableName=qualifiedName
       usingMethod? '(' indexElem (',' indexElem)* ')'
+      includeClause?
       whereClause?
     ;
 
-usingMethod : USING identifier ;
-indexElem   : identifier sortOrder? ;
-sortOrder   : ASC | DESC ;
-whereClause : WHERE booleanExpr ;
+includeClause : INCLUDE '(' identifier (',' identifier)* ')' ;
 
-/* ======================= CREATE VIEW (SELECT gọn) ======================= */
-createViewStatement
-    : CREATE (OR REPLACE)? VIEW viewName=qualifiedName AS selectStmt
+usingMethod : USING identifier ;
+
+indexElem
+    : expr collateClause? opclassClause? nullsOrder? sortOrder?
     ;
 
-/* -------- SELECT rút gọn, đủ cho view trong file mẫu -------- */
+sortOrder   : ASC | DESC ;
+
+collateClause  : COLLATE qualifiedName ;
+
+opclassClause  : qualifiedName ;
+
+nullsOrder   : NULLS ( FIRST | LAST ) ;
+
+whereClause : WHERE booleanExpr ;
+
+/* ---------- CREATE VIEW ---------- */
+createViewStatement
+    : CREATE (OR REPLACE)? VIEW viewName=qualifiedName
+      (WITH '(' ( . )*? ')')?
+      AS selectStmt
+      (WITH (CASCADED | LOCAL)? CHECK OPTION)?
+      (WITH (NO)? DATA)?
+    ;
+
+/* ---------- CREATE MATERIALIZED VIEW ---------- */
+createMaterializedViewStatement
+    : CREATE MATERIALIZED VIEW viewName=qualifiedName
+      (WITH '(' ( . )*? ')')?
+      AS selectStmt
+      (WITH (NO)? DATA)?
+    ;
+
+/* ======================= CREATE FUNCTION / PROCEDURE / DO ======================= */
+/* ---------- CREATE FUNCTION ---------- */
+createFunctionStatement
+    : CREATE (OR REPLACE)? FUNCTION funcName=qualifiedName '(' funcParams? ')'
+      RETURNS returnsType
+      functionTail
+    ;
+
+returnsType
+    : SETOF? qualifiedName
+    | TABLE '(' funcParam (',' funcParam)* ')'
+    | TRIGGER
+    | EVENT_TRIGGER
+    | VOID
+    ;
+
+funcParams
+    : funcParam (',' funcParam)*
+    ;
+
+funcParam
+    : identifier identifier?
+    ;
+
+functionTail
+    : (funcOption)* functionBodyOrLang
+    ;
+
+funcOption
+    : IMMUTABLE
+    | STABLE
+    | VOLATILE
+    | STRICT
+    | SECURITY ( INVOKER | DEFINER )
+    | PARALLEL ( SAFE | RESTRICTED | UNSAFE )
+    ;
+
+funcLang : LANGUAGE lang=identifier ;
+
+funcBody : AS (dollarBody | STRING) ;
+
+functionBodyOrLang
+    : funcLang funcBody?
+    | funcBody funcLang?
+    ;
+
+/* ---------- CREATE PROCEDURE ---------- */
+createProcedureStatement
+    : CREATE (OR REPLACE)? PROCEDURE procName=qualifiedName '(' funcParams? ')'
+    procedureTail
+    ;
+
+procLang : LANGUAGE lang=identifier ;
+
+procBody : AS (dollarBody | STRING) ;
+
+procedureBodyOrLang
+    : procLang procBody?
+    | procBody procLang?
+    ;
+
+procedureTail
+    : procedureBodyOrLang
+    ;
+
+/* ---------- DO ---------- */
+doStatement
+    : DO (LANGUAGE lang=identifier)? (dollarBody | STRING)
+    ;
+
+/* ---------- CREATE TRIGGER ---------- */
+createTriggerStatement
+    : CREATE TRIGGER trgName=identifier
+      (CONSTRAINT)?
+      (BEFORE | AFTER | INSTEAD OF)? trgEvents
+      ON onTable=qualifiedName
+      (REFERENCING ( . )*? )?
+      (DEFERRABLE ( INITIALLY ( DEFERRED | IMMEDIATE ) )?)?
+      (FOR EACH (ROW | STATEMENT))?
+      (WHEN '(' booleanExpr ')')?
+      EXECUTE (FUNCTION | PROCEDURE) execFunc=qualifiedName '(' argList? ')'
+    ;
+
+
+trgEvents
+    : INSERT
+    | DELETE
+    | UPDATE (OF columnList)?
+    | INSERT OR UPDATE OR DELETE
+    ;
+
+columnList : identifier (',' identifier)* ;
+
+argList
+    : (STRING | INTEGER | identifier) (',' (STRING | INTEGER | identifier))*
+    ;
+
+/* ---------- CREATE TYPE ---------- */
+createTypeEnumStatement
+    : CREATE TYPE (IF NOT EXISTS)? typeName=qualifiedName AS ENUM '(' stringList ')'
+    ;
+
+createTypeCompositeStatement
+    : CREATE TYPE (IF NOT EXISTS)? typeName=qualifiedName AS '(' compField (',' compField)* ')'
+    ;
+
+compField : identifier dataType ;
+
+stringList : STRING (',' STRING)* ;
+
+/* ---------- CREATE EXTENSION ---------- */
+createExtensionStatement
+    : CREATE EXTENSION (IF NOT EXISTS)? extName=identifier (WITH (SCHEMA identifier)?)?
+    ;
+
+/* ---------- CREATE DOMAIN ---------- */
+createDomainStatement
+    : CREATE DOMAIN domainName=qualifiedName AS baseType=identifier
+      (DEFAULT expr)?
+      (NOT NULL | NULL)?
+      (CONSTRAINT identifier CHECK '(' booleanExpr ')')?
+    ;
+
+/* ---------- CREATE SEQUENCE ---------- */
+createSequenceStatement
+    : CREATE SEQUENCE (IF NOT EXISTS)? seqName=qualifiedName ( ~SEMI )*
+    ;
+
+/* ---------- CREATE POLICY ---------- */
+createPolicyStatement
+    : CREATE POLICY polName=identifier ON tbl=qualifiedName
+      (FOR (ALL | SELECT | INSERT | UPDATE | DELETE))?
+      (TO roleList)?
+      (USING '(' booleanExpr ')')?
+      (WITH CHECK '(' booleanExpr ')')?
+    ;
+
+roleList : identifier (',' identifier)* ;
+
+/* ---------- COMMENT ON ---------- */
+commentOnStatement
+    : COMMENT ON commentTarget commentName IS (NULL | STRING | dollarBody)
+    ;
+
+commentTarget
+    : TABLE | COLUMN | SEQUENCE | VIEW | MATERIALIZED VIEW | TYPE | FUNCTION | INDEX | DOMAIN
+    ;
+
+commentName
+    : ( FUNCTION )? functionNameWithSig
+    | qualifiedName ('.' identifier)?
+    ;
+
+functionNameWithSig
+    : qualifiedName '(' commentTypeList? ')'
+    ;
+
+commentTypeList
+    : commentType (',' commentType)*
+    ;
+
+commentType
+    : (IN | OUT | INOUT)? qualifiedName (arrayType)? (typeModifiers)?
+    ;
+
+/* ---------- SELECT ---------- */
 selectStmt
-    : SELECT selectList fromClause whereClause? groupByClause? havingClause? orderByClause?
+    : SELECT selectList fromClause? whereClause? groupByClause? havingClause? orderByClause?
     ;
 
 selectList
@@ -125,7 +347,7 @@ fromClause
     ;
 
 tableRef
-    : qualifiedName (identifier)?      // alias
+    : qualifiedName (identifier)?
     ;
 
 joinClause
@@ -143,13 +365,11 @@ havingClause   : HAVING booleanExpr ;
 orderByClause  : ORDER BY orderItem (',' orderItem)* ;
 orderItem      : expr (ASC | DESC)? ;
 
-/* ----------------- Biểu thức/điều kiện gọn ----------------- */
-booleanExpr
-    : booleanExpr AND booleanExpr
-    | booleanExpr OR  booleanExpr
-    | NOT booleanExpr
-    | predicate
-    ;
+/* ====================== EXPRESSIONS ====================== */
+booleanExpr : orExpr ;
+orExpr      : andExpr (OR andExpr)* ;
+andExpr     : notExpr (AND notExpr)* ;
+notExpr     : NOT notExpr | predicate ;
 
 predicate
     : expr compareOp expr
@@ -172,220 +392,156 @@ binaryOp
     | '+' | '-' | '*' | '/' | '%' | '^'
     ;
 
-functionCall
-    : identifier '(' (expr (',' expr)*)? ')'
-    ;
+functionCall   : qualifiedName '(' (expr (',' expr)*)? ')' ;
 
-/* ======================= CREATE FUNCTION / PROCEDURE / DO ======================= */
-createFunctionStatement
-    : CREATE (OR REPLACE)? FUNCTION funcName=qualifiedName '(' funcParams? ')'
-      RETURNS typeName=identifier
-      (LANGUAGE lang=identifier)?
-      (AS (dollarBody | STRING))?
-    ;
+/* ====================== DATATYPE ====================== */
+dataType : qualifiedName typeModifiers? arrayType? ;
 
-createProcedureStatement
-    : CREATE (OR REPLACE)? PROCEDURE procName=qualifiedName '(' funcParams? ')'
-      (LANGUAGE lang=identifier)?
-      (AS (dollarBody | STRING))?
-    ;
+typeModifiers : '(' INTEGER (',' INTEGER)* ')' ;
 
-doStatement
-    : DO (LANGUAGE lang=identifier)? (dollarBody | STRING)
-    ;
+arrayType : '[' ']' ('[' ']')* ;
 
-funcParams
-    : funcParam (',' funcParam)*
-    ;
-
-funcParam
-    : identifier identifier?                 // (type) | (name type)
-    ;
-
-/* ======================= CREATE TRIGGER ======================= */
-createTriggerStatement
-    : CREATE TRIGGER trgName=identifier
-      (BEFORE | AFTER | INSTEAD OF)? trgEvents
-      ON onTable=qualifiedName
-      (FOR EACH (ROW | STATEMENT))?
-      (WHEN '(' booleanExpr ')')?
-      EXECUTE FUNCTION execFunc=qualifiedName '(' argList? ')'
-    ;
-
-trgEvents
-    : INSERT
-    | DELETE
-    | UPDATE (OF columnList)?
-    | INSERT OR UPDATE OR DELETE
-    ;
-
-columnList : identifier (',' identifier)* ;
-
-argList
-    : (STRING | INTEGER | identifier) (',' (STRING | INTEGER | identifier))*
-    ;
-
-/* ======================= CREATE TYPE … AS ENUM ======================= */
-createTypeEnumStatement
-    : CREATE TYPE typeName=qualifiedName AS ENUM '(' stringList ')'
-    ;
-
-stringList : STRING (',' STRING)* ;
-
-/* ======================= CREATE EXTENSION ======================= */
-createExtensionStatement
-    : CREATE EXTENSION (IF NOT? EXISTS)? extName=identifier (WITH (SCHEMA identifier)?)?
-    ;
-
-/* ======================= CREATE DOMAIN ======================= */
-createDomainStatement
-    : CREATE DOMAIN domainName=qualifiedName AS baseType=identifier
-      (DEFAULT literal)?
-      (NOT NULL | NULL)?
-    ;
-
-/* ======================= CREATE POLICY (RLS) ======================= */
-createPolicyStatement
-    : CREATE POLICY polName=identifier ON tbl=qualifiedName
-      (FOR (ALL | SELECT | INSERT | UPDATE | DELETE))?
-      (TO roleList)?
-      (USING '(' booleanExpr ')')?
-      (WITH CHECK '(' booleanExpr ')')?
-    ;
-
-roleList : identifier (',' identifier)* ;
-
-/* ======================= COMMENT ON ======================= */
-commentOnStatement
-    : COMMENT ON commentTarget commentName IS (NULL | STRING | dollarBody)
-    ;
-
-commentTarget
-    : TABLE
-    | COLUMN
-    | SEQUENCE
-    | VIEW
-    | MATERIALIZED VIEW
-    | TYPE
-    | FUNCTION
-    | INDEX
-    | DOMAIN
-    ;
-
-commentName
-    : qualifiedName ('.' identifier)?
-    ;
-
-/* ======================= Common helpers ======================= */
+/* ==================== Common helpers ==================== */
 qualifiedName : identifier ('.' identifier)? ;
 identifier    : IDENTIFIER | QUOTED_IDENT ;
 literal       : STRING | INTEGER | DECIMAL | TRUE | FALSE | NULL ;
 dollarBody    : DOLLAR_BLOCK ;
 
+/* ============================== Lexer rules ============================== */
 /* ======================= Keywords ======================= */
-CREATE: 'CREATE';
-OR: 'OR';
-REPLACE: 'REPLACE';
-FUNCTION: 'FUNCTION';
-PROCEDURE: 'PROCEDURE';
-RETURNS: 'RETURNS';
-LANGUAGE: 'LANGUAGE';
-DO: 'DO';
-
-TRIGGER: 'TRIGGER';
-BEFORE: 'BEFORE';
-AFTER: 'AFTER';
-INSTEAD: 'INSTEAD';
-OF: 'OF';
-ROW: 'ROW';
-STATEMENT: 'STATEMENT';
-WHEN: 'WHEN';
-EXECUTE: 'EXECUTE';
-
-TYPE: 'TYPE';
-ENUM: 'ENUM';
-EXTENSION: 'EXTENSION';
-DOMAIN: 'DOMAIN';
-
-POLICY: 'POLICY';
-FOR: 'FOR';
-ALL: 'ALL';
-TO: 'TO';
-USING: 'USING';
-WITH: 'WITH';
-CHECK: 'CHECK';
-
-COMMENT: 'COMMENT';
-ON: 'ON';
-IS: 'IS';
-
-SCHEMA: 'SCHEMA';
-
-TABLE: 'TABLE';
-INDEX: 'INDEX';
-VIEW: 'VIEW';
+CREATE      : 'CREATE';
+OR          : 'OR';
+REPLACE     : 'REPLACE';
+FUNCTION    : 'FUNCTION';
+PROCEDURE   : 'PROCEDURE';
+RETURNS     : 'RETURNS';
+LANGUAGE    : 'LANGUAGE';
+DO          : 'DO';
+TRIGGER     : 'TRIGGER';
+BEFORE      : 'BEFORE';
+AFTER       : 'AFTER';
+INSTEAD     : 'INSTEAD';
+OF          : 'OF';
+ROW         : 'ROW';
+STATEMENT   : 'STATEMENT';
+WHEN        : 'WHEN';
+EXECUTE     : 'EXECUTE';
+TYPE        : 'TYPE';
+ENUM        : 'ENUM';
+EXTENSION   : 'EXTENSION';
+DOMAIN      : 'DOMAIN';
+POLICY      : 'POLICY';
+FOR         : 'FOR';
+ALL         : 'ALL';
+TO          : 'TO';
+USING       : 'USING';
+WITH        : 'WITH';
+CHECK       : 'CHECK';
+COMMENT     : 'COMMENT';
+ON          : 'ON';
+IS          : 'IS';
+SCHEMA      : 'SCHEMA';
+TABLE       : 'TABLE';
+INDEX       : 'INDEX';
+VIEW        : 'VIEW';
 MATERIALIZED: 'MATERIALIZED';
-COLUMN: 'COLUMN';
-UNIQUE: 'UNIQUE';
-IF: 'IF';
-NOT: 'NOT';
-EXISTS: 'EXISTS';
-UNLOGGED: 'UNLOGGED';
-TEMPORARY: 'TEMPORARY';
-TEMP: 'TEMP';
-PRIMARY: 'PRIMARY';
-KEY: 'KEY';
-DEFAULT: 'DEFAULT';
-NULL: 'NULL';
-REFERENCES: 'REFERENCES';
-FOREIGN: 'FOREIGN';
-CONSTRAINT: 'CONSTRAINT';
-
-SEQUENCE: 'SEQUENCE';
-
-INSERT: 'INSERT';
-UPDATE: 'UPDATE';
-DELETE: 'DELETE';
-SELECT: 'SELECT';
-FROM: 'FROM';
-WHERE: 'WHERE';
-AS: 'AS';
-
-ASC: 'ASC';
-DESC: 'DESC';
-
-JOIN: 'JOIN';
-INNER: 'INNER';
-LEFT: 'LEFT';
-RIGHT: 'RIGHT';
-FULL: 'FULL';
-CROSS: 'CROSS';
-
-GROUP: 'GROUP';
-BY: 'BY';
-HAVING: 'HAVING';
-ORDER: 'ORDER';
-
-AND: 'AND';
-EACH: 'EACH';
-
-TRUE: 'TRUE';
-FALSE: 'FALSE';
-
-CASCADE: 'CASCADE';
-RESTRICT: 'RESTRICT';
-SET: 'SET';
-NO: 'NO';
-ACTION: 'ACTION';
+COLUMN      : 'COLUMN';
+UNIQUE      : 'UNIQUE';
+IF          : 'IF';
+NOT         : 'NOT';
+EXISTS      : 'EXISTS';
+UNLOGGED    : 'UNLOGGED';
+TEMPORARY   : 'TEMPORARY';
+TEMP        : 'TEMP';
+PRIMARY     : 'PRIMARY';
+KEY         : 'KEY';
+DEFAULT     : 'DEFAULT';
+NULL        : 'NULL';
+REFERENCES  : 'REFERENCES';
+FOREIGN     : 'FOREIGN';
+CONSTRAINT  : 'CONSTRAINT';
+SEQUENCE    : 'SEQUENCE';
+INSERT      : 'INSERT';
+UPDATE      : 'UPDATE';
+DELETE      : 'DELETE';
+SELECT      : 'SELECT';
+FROM        : 'FROM';
+WHERE       : 'WHERE';
+AS          : 'AS';
+ASC         : 'ASC';
+DESC        : 'DESC';
+JOIN        : 'JOIN';
+INNER       : 'INNER';
+LEFT        : 'LEFT';
+RIGHT       : 'RIGHT';
+FULL        : 'FULL';
+CROSS       : 'CROSS';
+GROUP       : 'GROUP';
+BY          : 'BY';
+HAVING      : 'HAVING';
+ORDER       : 'ORDER';
+AND         : 'AND';
+EACH        : 'EACH';
+TRUE        : 'TRUE';
+FALSE       : 'FALSE';
+CASCADE     : 'CASCADE';
+RESTRICT    : 'RESTRICT';
+SET         : 'SET';
+NO          : 'NO';
+ACTION      : 'ACTION';
+COLLATE     : 'COLLATE';
+NULLS       : 'NULLS';
+FIRST       : 'FIRST';
+LAST        : 'LAST';
+IMMUTABLE   : 'IMMUTABLE';
+STABLE      : 'STABLE';
+VOLATILE    : 'VOLATILE';
+STRICT      : 'STRICT';
+SECURITY    : 'SECURITY';
+INVOKER     : 'INVOKER';
+DEFINER     : 'DEFINER';
+PARALLEL    : 'PARALLEL';
+SAFE        : 'SAFE';
+RESTRICTED  : 'RESTRICTED';
+UNSAFE      : 'UNSAFE';
+DEFERRABLE  : 'DEFERRABLE';
+DEFERRED    : 'DEFERRED';
+IMMEDIATE   : 'IMMEDIATE';
+MATCH       : 'MATCH';
+SIMPLE      : 'SIMPLE';
+PARTIAL     : 'PARTIAL';
+VALID       : 'VALID';
+INITIALLY   : 'INITIALLY';
+INCLUDE     : 'INCLUDE';
+SETOF       : 'SETOF';
+IN          : 'IN';
+OUT         : 'OUT';
+INOUT       : 'INOUT';
+GENERATED   : 'GENERATED';
+ALWAYS      : 'ALWAYS';
+IDENTITY    : 'IDENTITY';
+CONCURRENTLY: 'CONCURRENTLY';
+TABLESPACE  : 'TABLESPACE';
+PARTITION   : 'PARTITION';
+CASCADED    : 'CASCADED';
+LOCAL       : 'LOCAL';
+OPTION      : 'OPTION';
+VOID        : 'VOID';
+DATA        : 'DATA';
+ONLY        : 'ONLY';
+REFERENCING : 'REFERENCING';
+EVENT_TRIGGER : 'EVENT_TRIGGER';
+AUTHORIZATION : 'AUTHORIZATION';
 
 /* ======================= Operators & punctuation ======================= */
-CONCAT : '||';
-STAR   : '*';
-SLASH  : '/';
-PLUS   : '+';
-MINUS  : '-';
-PERCENT: '%';
-CARET  : '^';
+CONCAT  : '||';
+STAR    : '*' ;
+SLASH   : '/' ;
+PLUS    : '+' ;
+MINUS   : '-' ;
+PERCENT : '%' ;
+CARET   : '^' ;
+SEMI    : ';' ;
 
 /* ======================= Lexical ======================= */
 QUOTED_IDENT : '"' (~["\\] | '\\"' | '\\\\')+ '"' ;
@@ -400,6 +556,7 @@ DOLLAR_BLOCK
     | '$' [a-zA-Z_][a-zA-Z_0-9$]* '$' ( . | '\r' | '\n' )*? '$' [a-zA-Z_][a-zA-Z_0-9$]* '$'
     ;
 
+/* Bỏ qua khoảng trắng & comment */
 WS           : [ \t\r\n]+ -> skip ;
 LINE_COMMENT : '--' ~[\r\n]* -> skip ;
 BLOCK_COMMENT: '/*' .*? '*/' -> skip ;
