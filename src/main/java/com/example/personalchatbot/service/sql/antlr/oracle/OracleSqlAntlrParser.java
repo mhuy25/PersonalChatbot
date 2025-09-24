@@ -141,6 +141,8 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
             if (ctx.stCreatePackageSpec() != null)       return visit(ctx.stCreatePackageSpec());
             if (ctx.stCreatePackageBody() != null)       return visit(ctx.stCreatePackageBody());
             if (ctx.stCreateProcedure() != null)         return visit(ctx.stCreateProcedure());
+            if (ctx.stCreateFunction() != null)          return visit(ctx.stCreateFunction());
+            if (ctx.stCreateType() != null)              return visit(ctx.stCreateType());
             if (ctx.stAnonymousBlock() != null)          return MetadataDto.minimal("BEGIN_BLOCK");
             if (ctx.stAlterSession() != null)            return MetadataDto.minimal("ALTER_SESSION");
             if (ctx.stComment() != null)                 return MetadataDto.minimal("COMMENT");
@@ -371,6 +373,30 @@ public class OracleSqlAntlrParser implements AntlrSqlParserImpl {
                     .statementType("PROCEDURE")
                     .objectName(unquote(text(ctx.procName)))
                     .schemaName(null)
+                    .tables(Collections.emptyList())
+                    .columns(Collections.emptyList())
+                    .build();
+        }
+
+        @Override
+        public MetadataDto visitStCreateFunction(OracleSQLParser.StCreateFunctionContext ctx) {
+            return MetadataDto.builder()
+                    .statementType("FUNCTION")
+                    .objectName(unquote(text(ctx.funName)))
+                    .schemaName(null)
+                    .tables(Collections.emptyList())
+                    .columns(Collections.emptyList())
+                    .build();
+        }
+
+        @Override
+        public MetadataDto visitStCreateType(OracleSQLParser.StCreateTypeContext ctx) {
+            String[] so = splitQname(ctx.typeName);
+            String schemaName = so[0], objectName = so[1];
+            return MetadataDto.builder()
+                    .statementType("TYPE")
+                    .schemaName(schemaName)
+                    .objectName(objectName)
                     .tables(Collections.emptyList())
                     .columns(Collections.emptyList())
                     .build();

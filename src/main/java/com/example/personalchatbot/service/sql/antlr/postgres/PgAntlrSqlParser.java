@@ -136,6 +136,7 @@ public class PgAntlrSqlParser implements AntlrSqlParserImpl {
             if (ctx.createSequenceStatement() != null)           return visit(ctx.createSequenceStatement());
             if (ctx.createPolicyStatement() != null)             return visit(ctx.createPolicyStatement());
             if (ctx.commentOnStatement() != null)                return MetadataDto.minimal("COMMENT_ON");
+            ctx.otherStatement();
             return MetadataDto.minimal("RAW_STATEMENT");
         }
 
@@ -143,7 +144,6 @@ public class PgAntlrSqlParser implements AntlrSqlParserImpl {
 
         @Override
         public MetadataDto visitCreateSchemaStatement(PostgreSQLParser.CreateSchemaStatementContext ctx) {
-            // objectName = tên schema
             String name = null;
             if (ctx.qualifiedName() != null) {
                 name = unquote(ctx.qualifiedName().getText());

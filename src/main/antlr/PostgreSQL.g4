@@ -28,6 +28,7 @@ sqlStatement
     | createSequenceStatement
     | createPolicyStatement
     | commentOnStatement
+    | otherStatement
     ;
 
 /* ====================== SQL STATEMENTS ====================== */
@@ -41,8 +42,28 @@ createSchemaStatement
 /* ---------- CREATE TABLE ---------- */
 createTableStatement
     : CREATE (TEMPORARY | TEMP)? UNLOGGED? TABLE (IF NOT EXISTS)? tableName=qualifiedName
-      '(' tableElement (',' tableElement)* ')'
-      ( tableWithClause | tableTablespaceClause | tablePartitionClause )*
+      (
+        // dạng định nghĩa cột
+        '(' tableElement (',' tableElement)* ')'
+        ( tableWithClause | tableTablespaceClause | tablePartitionClause | inheritsClause )*
+      |
+        // dạng PARTITION OF (không nhất thiết có cột)
+        PARTITION OF parent=qualifiedName partitionBounds?
+        ( tableWithClause | tableTablespaceClause )*
+      )
+    ;
+
+inheritsClause
+    : INHERITS parens
+    ;
+
+tablePartitionClause
+    : PARTITION BY identifier parens
+    ;
+
+partitionBounds
+    : DEFAULT
+    | FOR VALUES ( FROM parens TO parens | IN parens | WITH parens )
     ;
 
 tableWithClause
@@ -50,9 +71,6 @@ tableWithClause
 
 tableTablespaceClause
     : TABLESPACE identifier;
-
-tablePartitionClause
-    : PARTITION BY ( . )*?;
 
 tableElement
     : columnDefinition
@@ -71,10 +89,11 @@ columnConstraint
     : NULL
     | NOT NULL
     | DEFAULT expr
-    | CHECK '(' booleanExpr ')'
+    | CHECK parens
     | PRIMARY KEY
     | UNIQUE
     | GENERATED (ALWAYS | BY DEFAULT) AS IDENTITY identityOptions?
+    | GENERATED (ALWAYS | BY DEFAULT)? AS parens STORED
     | REFERENCES refTable=qualifiedName ('(' refColumnList ')')? refConstraintTail?
     ;
 
@@ -84,13 +103,15 @@ identityOptions
 
 tableConstraint
     : (CONSTRAINT identifier)? (
-      PRIMARY KEY '(' columnNameList ')'
-    | UNIQUE '(' columnNameList ')'
-    | FOREIGN KEY '(' columnNameList ')'
-      REFERENCES refTable=qualifiedName ('(' refColumnList ')')? refConstraintTail?
-    )
+        PRIMARY KEY '(' columnNameList ')'
+      | UNIQUE '(' columnNameList ')'
+      | FOREIGN KEY '(' columnNameList ')'
+          REFERENCES refTable=qualifiedName ('(' refColumnList ')')? refConstraintTail?
+      | EXCLUDE USING identifier parens (WHERE parens)?
+      | CHECK parens
+      | CONSTRAINT identifier CHECK parens
+      )
     ;
-
 
 matchClause     : MATCH ( FULL | SIMPLE | PARTIAL ) ;
 
@@ -133,7 +154,7 @@ includeClause : INCLUDE '(' identifier (',' identifier)* ')' ;
 usingMethod : USING identifier ;
 
 indexElem
-    : expr collateClause? opclassClause? nullsOrder? sortOrder?
+    : exprOrParenExpr collateClause? opclassClause? nullsOrder? sortOrder?
     ;
 
 sortOrder   : ASC | DESC ;
@@ -280,10 +301,16 @@ createExtensionStatement
 
 /* ---------- CREATE DOMAIN ---------- */
 createDomainStatement
-    : CREATE DOMAIN domainName=qualifiedName AS baseType=identifier
-      (DEFAULT expr)?
-      (NOT NULL | NULL)?
-      (CONSTRAINT identifier CHECK '(' booleanExpr ')')?
+    : CREATE DOMAIN domainName=qualifiedName AS baseType=qualifiedName
+      domainConstraint*
+    ;
+
+domainConstraint
+    : DEFAULT expr
+    | NOT NULL
+    | NULL
+    | CONSTRAINT identifier CHECK parens
+    | CHECK parens
     ;
 
 /* ---------- CREATE SEQUENCE ---------- */
@@ -304,7 +331,12 @@ roleList : identifier (',' identifier)* ;
 
 /* ---------- COMMENT ON ---------- */
 commentOnStatement
-    : COMMENT ON commentTarget commentName IS (NULL | STRING | dollarBody)
+    : COMMENT ON
+        ( CONSTRAINT consName=identifier ON tbl=qualifiedName
+        | SCHEMA sch=qualifiedName
+        | commentTarget commentName
+        )
+      IS (NULL | STRING | dollarBody)
     ;
 
 commentTarget
@@ -365,6 +397,11 @@ havingClause   : HAVING booleanExpr ;
 orderByClause  : ORDER BY orderItem (',' orderItem)* ;
 orderItem      : expr (ASC | DESC)? ;
 
+/* ---------- OTHERS ---------- */
+otherStatement
+    : ( ~SEMI )+
+    ;
+
 /* ====================== EXPRESSIONS ====================== */
 booleanExpr : orExpr ;
 orExpr      : andExpr (OR andExpr)* ;
@@ -380,8 +417,15 @@ predicate
 compareOp : '=' | '!=' | '<>' | '<' | '<=' | '>' | '>=' ;
 
 expr
-    : expr binaryOp expr
-    | functionCall
+    : postfixExpr (binaryOp postfixExpr)*
+    ;
+
+postfixExpr
+    : primary ( '.' identifier )*
+    ;
+
+primary
+    : functionCall
     | qualifiedName
     | literal
     | '(' expr ')'
@@ -389,7 +433,13 @@ expr
 
 binaryOp
     : CONCAT
+    | DBL_COLON
     | '+' | '-' | '*' | '/' | '%' | '^'
+    ;
+
+exprOrParenExpr
+    : expr
+    | '(' expr ')'
     ;
 
 functionCall   : qualifiedName '(' (expr (',' expr)*)? ')' ;
@@ -406,6 +456,9 @@ qualifiedName : identifier ('.' identifier)? ;
 identifier    : IDENTIFIER | QUOTED_IDENT ;
 literal       : STRING | INTEGER | DECIMAL | TRUE | FALSE | NULL ;
 dollarBody    : DOLLAR_BLOCK ;
+parens
+    : '(' ( parens | ~( '(' | ')' ) )* ')'
+    ;
 
 /* ============================== Lexer rules ============================== */
 /* ======================= Keywords ======================= */
@@ -529,6 +582,10 @@ OPTION      : 'OPTION';
 VOID        : 'VOID';
 DATA        : 'DATA';
 ONLY        : 'ONLY';
+STORED      : 'STORED';
+EXCLUDE     : 'EXCLUDE';
+INHERITS    : 'INHERITS';
+VALUES      : 'VALUES';
 REFERENCING : 'REFERENCING';
 EVENT_TRIGGER : 'EVENT_TRIGGER';
 AUTHORIZATION : 'AUTHORIZATION';
@@ -542,6 +599,11 @@ MINUS   : '-' ;
 PERCENT : '%' ;
 CARET   : '^' ;
 SEMI    : ';' ;
+DBL_COLON   : '::' ;
+TILDE_STAR  : '~*' ;
+COLON   : ':' ;
+TILDE   : '~' ;
+ANDAND      : '&&' ;
 
 /* ======================= Lexical ======================= */
 QUOTED_IDENT : '"' (~["\\] | '\\"' | '\\\\')+ '"' ;

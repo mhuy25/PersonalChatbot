@@ -31,6 +31,8 @@ sqlStatement
     | stCreatePackageSpec
     | stCreatePackageBody
     | stCreateProcedure
+    | stCreateFunction
+    | stCreateType
     | stAnonymousBlock
     | stAlterSession
     | stComment
@@ -173,6 +175,32 @@ refreshClause
   : REFRESH (FAST | COMPLETE | FORCE)?
     (ON (DEMAND | COMMIT))?
   ;
+
+/* ---------- CREATE FUNCTION ---------- */
+stCreateFunction
+    :   CREATE ( OR REPLACE )? FUNCTION funName=id
+        ( . )*?
+        ( IS | AS )
+        ( . )*?
+        END ( id )?
+        ( terminatorSemi )? slashTerm
+    |   CREATE ( OR REPLACE )? FUNCTION funName=id
+        ( . )*?
+        ( IS | AS )
+        ( . )*?
+        END ( id )?
+        terminatorSemi
+    ;
+
+/* ---------- CREATE TYPE ---------- */
+stCreateType
+    :   CREATE ( OR REPLACE )? TYPE typeName=qname
+        ( ( AS | IS ) ( . )*? )
+        ( terminatorSemi )? slashTerm
+    |   CREATE ( OR REPLACE )? TYPE typeName=qname
+        ( ( AS | IS ) ( . )*? )
+        terminatorSemi
+    ;
 
 /* ---------- SELECT ---------- */
 selectStatement
@@ -510,6 +538,7 @@ NOVALIDATE  : 'NOVALIDATE';
 RELY        : 'RELY';
 NORELY      : 'NORELY';
 USING       : 'USING';
+TYPE        : 'TYPE';
 
 
 /* Identifier & literal */
