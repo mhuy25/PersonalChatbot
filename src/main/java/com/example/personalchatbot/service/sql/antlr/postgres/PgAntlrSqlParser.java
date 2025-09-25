@@ -412,7 +412,7 @@ public class PgAntlrSqlParser implements AntlrSqlParserImpl {
         @Override
         public void syntaxError(Recognizer<?, ?> recognizer, Object offendingSymbol,
                                 int line, int charPositionInLine, String msg, RecognitionException e) {
-            log.info("ANTLR 4 xử lý dòng {} lỗi: {}", line, msg);
+            throw new RuntimeException("ANTLR 4 (PostgreSQL) lỗi dòng " + line + ": " + msg);
         }
     }
 }

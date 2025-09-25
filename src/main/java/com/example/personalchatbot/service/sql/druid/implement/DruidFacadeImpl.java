@@ -6,7 +6,6 @@ import java.util.List;
 
 /**
  * Facade mỏng cho Druid để tách câu & phân tích metadata theo dialect.
- * Bạn giữ implementation cũ (nếu đã có); service chỉ gọi qua interface này.
  */
 public interface DruidFacadeImpl {
 

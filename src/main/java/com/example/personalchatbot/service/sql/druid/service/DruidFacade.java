@@ -20,10 +20,7 @@ import java.util.List;
 /**
  * Facade cho Alibaba Druid: tách câu & lấy metadata cho từng câu.
  * - splitStatements(): Dùng Druid splitter (không regex). Nếu Druid fail, ném Exception để caller fallback sang ANTLR.
- * - analyze(): Dùng Druid AST để suy ra MetadataDto (CREATE TABLE/INDEX có type riêng; còn lại "RAW_STATEMENT").
- * Lưu ý:
- *   - Class này KHÔNG xử lý fallback. Fallback (ANTLR/LLM) nằm ở tầng service (SqlChunkServiceImpl) theo flow đã thống nhất.
- *   - Với các dialect ngoài MySQL/PostgreSQL, class sẽ ném UnsupportedOperationException để tầng trên quyết định fallback.
+ * - analyze(): Dùng Druid AST để suy ra MetadataDto còn lại "RAW_STATEMENT").
  */
 @Service
 public class DruidFacade implements DruidFacadeImpl {
@@ -33,8 +30,7 @@ public class DruidFacade implements DruidFacadeImpl {
     @Override
     public List<String> split(String sql, String dialect) {
         try {
-            final DbType dbType = DbType.of(dialect); // có thể trả null -> để Druid tự xử/throw
-            // Dùng parseStatements để cắt an toàn (không regex, handle ; trong string/comment)
+            final DbType dbType = DbType.of(dialect);
             final List<SQLStatement> list = SQLUtils.parseStatements(sql, dbType);
             if (list.isEmpty() && !sql.trim().isEmpty()) {
                 throw new IllegalStateException("Druid parsed no statements.");
@@ -45,7 +41,6 @@ public class DruidFacade implements DruidFacadeImpl {
             }
             return out;
         } catch (Throwable t) {
-            // Cho service biết Druid split không xử lý được -> fallback ANTLR.split
             throw new RuntimeException("Druid split failed: " + t.getMessage(), t);
         }
     }
@@ -74,7 +69,7 @@ public class DruidFacade implements DruidFacadeImpl {
                         .build();
             }
 
-            // CREATE INDEX (generic)
+            // CREATE INDEX
             if (st instanceof SQLCreateIndexStatement c) {
                 QName q = qnameOf(c.getName());
                 QName tbl = qnameOf(c.getTable());
@@ -89,7 +84,6 @@ public class DruidFacade implements DruidFacadeImpl {
                         .build();
             }
 
-            // Các loại còn lại: lấy tables/columns cơ bản bằng visitor (nếu có)
             SchemaStatVisitor visitor = createVisitor(dbType);
             if (visitor != null) {
                 st.accept(visitor);
@@ -122,13 +116,11 @@ public class DruidFacade implements DruidFacadeImpl {
                         .build();
             }
 
-            // Không có visitor phù hợp -> metadata tối thiểu
             return MetadataDto.builder()
                     .statementType("RAW_STATEMENT")
                     .build();
 
         } catch (Throwable t) {
-            // Để layer trên fallback ANTLR/LLM
             throw new RuntimeException("Druid analyze failed: " + t.getMessage(), t);
         }
     }
@@ -140,7 +132,6 @@ public class DruidFacade implements DruidFacadeImpl {
         return switch (dbType) {
             case mysql, mariadb, tidb, polardbx, adb_mysql -> new MySqlSchemaStatVisitor();
             default -> {
-                // Họ hàng PostgreSQL có thể dùng chung PG visitor
                 if (DbType.isPostgreSQLDbStyle(dbType)) {
                     yield new PGSchemaStatVisitor();
                 }
@@ -227,5 +218,6 @@ public class DruidFacade implements DruidFacadeImpl {
             return (schema == null || schema.isEmpty() || object == null) ? object : (schema + "." + object);
         }
     }
+
     private static String emptyToNull(String s){ return (s == null || s.trim().isEmpty()) ? null : s.trim(); }
 }

@@ -4,16 +4,17 @@ import com.example.personalchatbot.service.sql.antlr.implement.AntlrSqlParserImp
 import com.example.personalchatbot.service.sql.dto.MetadataDto;
 import com.example.personalchatbot.service.sql.dto.SqlChunkDto;
 import lombok.NonNull;
+import lombok.extern.slf4j.Slf4j;
 import org.antlr.v4.runtime.*;
+import org.antlr.v4.runtime.misc.Interval;
+import org.springframework.stereotype.Component;
 import com.example.personalchatbot.service.sql.antlr.mysql.MySQLParser;
 import com.example.personalchatbot.service.sql.antlr.mysql.MySQLLexer;
 import com.example.personalchatbot.service.sql.antlr.mysql.MySQLBaseVisitor;
-import org.springframework.stereotype.Component;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import java.util.*;
 
+@Slf4j
 @Component
 public class MySqlAntlrSqlParser implements AntlrSqlParserImpl {
 
@@ -23,262 +24,329 @@ public class MySqlAntlrSqlParser implements AntlrSqlParserImpl {
     }
 
     /* --------------------- Split --------------------- */
-
     @Override
-    public List<SqlChunkDto> split(@NonNull String sql) {
-        // Không dùng regex. Quét tuyến tính, hỗ trợ DELIMITER động giống mysql client.
-        final String src = sql;
-        final int n = src.length();
-        String delimiter = ";";       // mặc định
+    public List<SqlChunkDto> split(@NonNull String script) {
+        MySQLParser.SqlStatementsContext root = parseSql(script);
+        List<SqlChunkDto> chunks = new ArrayList<>();
+
         int i = 0;
-        int stmtBeg = 0;
-        List<SqlChunkDto> out = new ArrayList<>();
+        for (MySQLParser.SqlStatementContext st : root.sqlStatement()) {
+            Interval itv = intervalOf(st);
+            String text = slice(script, itv).trim();
 
-        while (i < n) {
-            // bỏ comment dòng & block đơn giản để không làm sai sót delimiter trong comment
-            if (i + 1 < n && src.charAt(i) == '-' && src.charAt(i + 1) == '-') {
-                int j = i + 2;
-                while (j < n && src.charAt(j) != '\n' && src.charAt(j) != '\r') j++;
-                i = j; // skip line comment
-                continue;
-            }
-            if (i + 1 < n && src.charAt(i) == '/' && src.charAt(i + 1) == '*') {
-                int j = i + 2;
-                while (j + 1 < n && !(src.charAt(j) == '*' && src.charAt(j + 1) == '/')) j++;
-                i = Math.min(n, j + 2);
-                continue;
-            }
+            MetadataDto metadata = analyzeByNode(st);
+            String kind = (metadata != null && metadata.getStatementType() != null)
+                    ? metadata.getStatementType()
+                    : "RAW_STATEMENT";
 
-            // Nếu bắt đầu dòng và là directive DELIMITER -> cập nhật delimiter và flush phần trước đó (nếu có)
-            if ((i == 0 || src.charAt(i - 1) == '\n' || src.charAt(i - 1) == '\r')) {
-                // đọc token đầu dòng (bỏ trắng)
-                int j = i;
-                while (j < n && Character.isWhitespace(src.charAt(j))) j++;
-                int k = j;
-                while (k < n && !Character.isWhitespace(src.charAt(k))) k++;
-                String head = src.substring(j, k);
-                if ("DELIMITER".equalsIgnoreCase(head)) {
-                    // flush statement trước directive theo delimiter cũ (nếu có kí tự hữu ích)
-                    String prev = src.substring(stmtBeg, j).trim();
-                    if (!prev.isEmpty()) {
-                        out.add(SqlChunkDto.builder()
-                                .index(out.size()).part(1).totalParts(1)
-                                .dialect(dialect()).content(prev).build());
-                    }
-                    // đọc giá trị delimiter mới tới hết dòng
-                    int dBeg = k;
-                    while (dBeg < n && Character.isWhitespace(src.charAt(dBeg))) dBeg++;
-                    int dEnd = dBeg;
-                    while (dEnd < n && src.charAt(dEnd) != '\n' && src.charAt(dEnd) != '\r') dEnd++;
-                    delimiter = src.substring(dBeg, dEnd).trim();
-                    if (delimiter.isEmpty()) delimiter = ";";
-                    // bỏ hẳn directive (không tạo chunk), đặt begin cho statement tiếp theo
-                    i = (dEnd < n && src.charAt(dEnd) == '\r' && dEnd + 1 < n && src.charAt(dEnd + 1) == '\n') ? dEnd + 2 : dEnd + 1;
-                    stmtBeg = i;
-                    continue;
-                }
-            }
-
-            // kiểm tra kết thúc bởi delimiter hiện tại
-            if (src.startsWith(delimiter, i)) {
-                String part = src.substring(stmtBeg, i).trim();
-                if (!part.isEmpty()) {
-                    out.add(SqlChunkDto.builder()
-                            .index(out.size()).part(1).totalParts(1)
-                            .dialect(dialect()).content(part).build());
-                }
-                i += delimiter.length();
-                stmtBeg = i;
-                continue;
-            }
-
-            i++;
+            SqlChunkDto dto = SqlChunkDto.builder()
+                    .index(i++)
+                    .part(1)
+                    .totalParts(1)
+                    .dialect(dialect())
+                    .kind(kind)
+                    .schemaName(metadata != null ? metadata.getSchemaName() : null)
+                    .objectName(metadata != null ? metadata.getObjectName() : null)
+                    .content(text)
+                    .metadata(metadata)
+                    .metadataJson(null)
+                    .build();
+            chunks.add(dto);
         }
-
-        // tail
-        String tail = src.substring(stmtBeg).trim();
-        if (!tail.isEmpty()) {
-            out.add(SqlChunkDto.builder()
-                    .index(out.size()).part(1).totalParts(1)
-                    .dialect(dialect()).content(tail).build());
-        }
-        return out;
+        return chunks;
     }
 
     /* --------------------- Analyze --------------------- */
-
     @Override
-    public MetadataDto analyze(String statement) {
-        if (statement == null || statement.trim().isEmpty()) {
-            return MetadataDto.builder().statementType("RAW_STATEMENT").build();
+    public MetadataDto analyze(@NonNull String singleStatement) {
+        MySQLParser p = newParser(singleStatement);
+        MySQLParser.SqlStatementsContext root = p.sqlStatements();
+        List<MySQLParser.SqlStatementContext> list = root.sqlStatement();
+        if (list.isEmpty()) {
+            return MetadataDto.minimal("RAW_STATEMENT");
         }
+        MetadataDto md = analyzeByNode(list.getFirst());
+        return md != null ? md : MetadataDto.minimal("RAW_STATEMENT");
+    }
 
-        CharStream input = CharStreams.fromString(statement);
-        MySQLLexer lexer = new MySQLLexer(input);
-        lexer.removeErrorListeners();
+    /* ===================== ANTLR bootstrap ===================== */
+
+    private MySQLParser.SqlStatementsContext parseSql(String text) {
+        MySQLParser parser = newParser(text);
+        return parser.sqlStatements();
+    }
+
+    private MySQLParser newParser(String text) {
+        CharStream cs = CharStreams.fromString(text);
+        MySQLLexer lexer = new MySQLLexer(cs);
         CommonTokenStream tokens = new CommonTokenStream(lexer);
-        tokens.fill();
-
-        List<Token> ts = tokens.getTokens();
-        int i = nextNonDelim(ts, 0);
-
-        if (i >= ts.size()) {
-            return MetadataDto.builder().statementType("RAW_STATEMENT").build();
-        }
-
-        Token t0 = ts.get(i);
-        if (t0.getType() == MySQLLexer.CREATE) {
-            int j = nextNonDelim(ts, i + 1);
-            if (j < ts.size()) {
-                int type = ts.get(j).getType();
-
-                // CREATE DATABASE/SCHEMA name
-                if (type == MySQLLexer.DATABASE || type == MySQLLexer.SCHEMA) {
-                    String name = readQualifiedName(ts, j + 1);
-                    return MetadataDto.builder()
-                            .statementType("CREATE_DATABASE")
-                            .objectName(emptyToNull(name))
-                            .build();
-                }
-
-                // CREATE TABLE name (...)
-                if (type == MySQLLexer.TABLE) {
-                    int k = skipIfNotExists(ts, j + 1);
-                    String name = readQualifiedName(ts, k);
-                    return MetadataDto.builder()
-                            .statementType("CREATE_TABLE")
-                            .objectName(emptyToNull(nameOnly(name)))
-                            .tables(name == null ? Collections.emptyList() :
-                                    Collections.singletonList(name))
-                            .build();
-                }
-
-                // CREATE INDEX idx ON tbl (...)
-                if (type == MySQLLexer.INDEX || type == MySQLLexer.UNIQUE) {
-                    int k = (type == MySQLLexer.UNIQUE) ? nextType(ts, j + 1, MySQLLexer.INDEX) : j;
-                    String idxName = readQualifiedName(ts, k + 1);
-                    int onPos = nextType(ts, k + 1, MySQLLexer.ON);
-                    String tbl = readQualifiedName(ts, onPos + 1);
-                    return MetadataDto.builder()
-                            .statementType("CREATE_INDEX")
-                            .objectName(emptyToNull(nameOnly(idxName)))
-                            .tables(tbl == null ? Collections.emptyList() :
-                                    Collections.singletonList(tbl))
-                            .build();
-                }
-
-                // CREATE VIEW name AS ...
-                if (type == MySQLLexer.VIEW) {
-                    String name = readQualifiedName(ts, j + 1);
-                    return MetadataDto.builder()
-                            .statementType("CREATE_VIEW")
-                            .objectName(emptyToNull(nameOnly(name)))
-                            .build();
-                }
-
-                // CREATE FUNCTION / PROCEDURE name (...)
-                if (type == MySQLLexer.FUNCTION) {
-                    String fn = readQualifiedName(ts, j + 1);
-                    return MetadataDto.builder()
-                            .statementType("CREATE_FUNCTION")
-                            .objectName(emptyToNull(nameOnly(fn)))
-                            .build();
-                }
-                if (type == MySQLLexer.PROCEDURE) {
-                    String pn = readQualifiedName(ts, j + 1);
-                    return MetadataDto.builder()
-                            .statementType("CREATE_PROCEDURE")
-                            .objectName(emptyToNull(nameOnly(pn)))
-                            .build();
-                }
-            }
-        }
-
-        // fallback: chưa nhận dạng -> RAW
-        return MetadataDto.builder().statementType("RAW_STATEMENT").build();
+        MySQLParser parser = new MySQLParser(tokens);
+        lexer.removeErrorListeners();
+        parser.removeErrorListeners();
+        parser.addErrorListener(new SilentErrorListener());
+        parser.setErrorHandler(new DefaultErrorStrategy());
+        return parser;
     }
 
-    /* --------------------- Tiny utilities (local) --------------------- */
-
-    private static int nextNonDelim(List<Token> ts, int from) {
-        int i = Math.max(0, from);
-        while (i < ts.size()) {
-            int tp = ts.get(i).getType();
-            if (tp != MySQLLexer.DELIM && tp != Token.EOF) break;
-            i++;
-        }
-        return i;
+    private static Interval intervalOf(ParserRuleContext ctx) {
+        Token start = ctx.getStart();
+        Token stop  = ctx.getStop();
+        int a = (start != null) ? start.getStartIndex() : 0;
+        int b = (stop  != null) ? stop.getStopIndex()  : a;
+        return Interval.of(a, b);
     }
 
-    private static int nextType(List<Token> ts, int from, int want) {
-        for (int i = Math.max(0, from); i < ts.size(); i++) {
-            if (ts.get(i).getType() == want) return i;
-        }
-        return ts.size(); // not found
+    private static String slice(String src, Interval itv) {
+        if (src == null || itv == null) return "";
+        int a = Math.max(0, itv.a);
+        int b = Math.min(src.length(), itv.b + 1);
+        if (a >= b) return "";
+        return src.substring(a, b);
     }
 
-    private static int skipIfNotExists(List<Token> ts, int from) {
-        int i = nextNonDelim(ts, from);
-        // IF NOT EXISTS
-        if (i < ts.size() && ts.get(i).getType() == MySQLLexer.IF) {
-            int j = nextNonDelim(ts, i + 1);
-            if (j < ts.size() && ts.get(j).getType() == MySQLLexer.NOT) {
-                int k = nextNonDelim(ts, j + 1);
-                if (k < ts.size() && ts.get(k).getType() == MySQLLexer.EXISTS) {
-                    return nextNonDelim(ts, k + 1);
-                }
-            }
-        }
-        return i;
+    private static String qnameText(MySQLParser.QualifiedNameContext q) {
+        return q != null ? q.getText() : null;
     }
 
-    /** Đọc qualified name kể từ vị trí 'from' cho tới trước LPAREN/AS/ON/... */
-    private static String readQualifiedName(List<Token> ts, int from) {
-        StringBuilder sb = new StringBuilder();
-        int i = nextNonDelim(ts, from);
-        while (i < ts.size()) {
-            int tp = ts.get(i).getType();
-            if (tp == MySQLLexer.LPAREN || tp == MySQLLexer.AS
-                    || tp == MySQLLexer.ON || tp == MySQLLexer.WHERE) break;
-
-            String txt = ts.get(i).getText();
-            if (txt == null) break;
-            String t = txt.trim();
-            if (t.isEmpty()) break;
-
-            if (tp == MySQLLexer.COMMA) break;
-            if (tp == MySQLLexer.DELIM) break;
-
-            if (tp == MySQLLexer.DOT) {
-                sb.append('.');
-            } else {
-                if (!sb.isEmpty() && sb.charAt(sb.length()-1) != '.') sb.append(' ');
-                sb.append(t);
-            }
-            i++;
-            // dừng khi gặp khoảng trắng trước '('
-            if (i < ts.size() && ts.get(i).getType() == MySQLLexer.LPAREN) break;
-        }
-        return normalizeName(sb.toString());
+    private static String idText(MySQLParser.IdentifierContext id) {
+        return id != null ? id.getText() : null;
     }
 
     private static String normalizeName(String raw) {
         if (raw == null) return null;
         String t = raw.trim();
         if (t.isEmpty()) return null;
-        // bỏ quote/backtick nếu có, và loại space giữa các phần (do cách nối ở trên)
         t = t.replace("`", "").replace("\"", "").replace("'", "");
-        t = t.replace(" ", "");
         return t;
+    }
+
+    private static String[] splitQname(MySQLParser.QualifiedNameContext q) {
+        if (q == null) return new String[]{null, null};
+        List<MySQLParser.IdentifierContext> ids = q.identifier();
+        if (ids == null || ids.isEmpty()) return new String[]{null, null};
+        String obj = normalizeName(ids.getLast().getText());
+        String schema = (ids.size() > 1) ? normalizeName(ids.getFirst().getText()) : null;
+        return new String[]{schema, obj};
     }
 
     private static String nameOnly(String qn) {
         if (qn == null) return null;
         int dot = qn.lastIndexOf('.');
-        return dot >= 0 ? qn.substring(dot + 1) : qn;
+        return (dot >= 0) ? qn.substring(dot + 1) : qn;
     }
 
-    private static String emptyToNull(String s) {
-        return (s == null || s.isBlank()) ? null : s;
+    /* ===================== Metadata qua Visitor ===================== */
+
+    private MetadataDto analyzeByNode(MySQLParser.SqlStatementContext st) {
+        return new AstVisitor().visit(st);
+    }
+
+    private static class AstVisitor extends MySQLBaseVisitor<MetadataDto> {
+
+        /* -------- CREATE SCHEMA / DATABASE / USE / DROP -------- */
+
+        @Override
+        public MetadataDto visitStCreateSchema(MySQLParser.StCreateSchemaContext x) {
+            String[] so = splitQname(x.createSchemaStatement().qualifiedName());
+            return MetadataDto.builder()
+                    .statementType("CREATE_SCHEMA")
+                    .schemaName(so[0])
+                    .objectName(so[1])
+                    .tables(Collections.emptyList())
+                    .columns(Collections.emptyList())
+                    .build();
+        }
+
+        @Override
+        public MetadataDto visitStCreateDatabase(MySQLParser.StCreateDatabaseContext x) {
+            MySQLParser.CreateDatabaseStatementContext ctx = x.createDatabaseStatement();
+            String db = normalizeName(idText(ctx.identifier()));
+            return MetadataDto.builder()
+                    .statementType("CREATE_DATABASE")
+                    .schemaName(null)
+                    .objectName(db)
+                    .tables(Collections.emptyList())
+                    .columns(Collections.emptyList())
+                    .build();
+        }
+
+        @Override
+        public MetadataDto visitStUse(MySQLParser.StUseContext x) {
+            String[] so = splitQname(x.useStatement().qualifiedName());
+            return MetadataDto.builder()
+                    .statementType("USE")
+                    .schemaName(so[0])
+                    .objectName(so[1])
+                    .tables(Collections.emptyList())
+                    .columns(Collections.emptyList())
+                    .build();
+        }
+
+        @Override
+        public MetadataDto visitStDrop(MySQLParser.StDropContext x) {
+            return MetadataDto.minimal("DROP");
+        }
+
+        /* ---------------------- CREATE TABLE ---------------------- */
+
+        @Override
+        public MetadataDto visitStCreateTable(MySQLParser.StCreateTableContext x) {
+            MySQLParser.CreateTableStatementContext ctx = x.createTableStatement();
+            String qn = normalizeName(qnameText(ctx.tableName));
+            String[] so = splitQname(ctx.tableName);
+            String schemaName = so[0], objectName = so[1];
+
+            TableScanner scanner = new TableScanner();
+            scanner.visit(ctx);
+
+            return MetadataDto.builder()
+                    .statementType("CREATE_TABLE")
+                    .schemaName(schemaName)
+                    .objectName(objectName != null ? objectName : nameOnly(qn))
+                    .tables(qn == null ? Collections.emptyList() : Collections.singletonList(qn))
+                    .columns(scanner.columns())
+                    .build();
+        }
+
+        private static class TableScanner extends MySQLBaseVisitor<Void> {
+            private final List<String> columns = new ArrayList<>();
+            List<String> columns() { return columns; }
+
+            @Override
+            public Void visitColumnDef(MySQLParser.ColumnDefContext ctx) {
+                String col = ctx.columnName != null ? normalizeName(ctx.columnName.getText()) : null;
+                String dt  = (ctx.dataType() != null) ? ctx.dataType().getText() : null;
+                if (col != null) {
+                    if (dt != null && !dt.isBlank()) {
+                        columns.add(col + " " + dt);
+                    } else {
+                        columns.add(col);
+                    }
+                }
+                return null;
+            }
+        }
+
+        /* ---------------------- CREATE INDEX ---------------------- */
+
+        @Override
+        public MetadataDto visitStCreateIndex(MySQLParser.StCreateIndexContext x) {
+            MySQLParser.CreateIndexStatementContext ctx = x.createIndexStatement();
+            String idx = normalizeName(qnameText(ctx.indexName));
+            String tbl = normalizeName(qnameText(ctx.tableName));
+
+            List<String> cols = new ArrayList<>();
+            for (MySQLParser.IndexElemContext e : ctx.indexElem()) {
+                cols.add(e.getText());
+            }
+
+            return MetadataDto.builder()
+                    .statementType("CREATE_INDEX")
+                    .schemaName(null)
+                    .objectName(idx != null ? nameOnly(idx) : null)
+                    .tables(tbl == null ? Collections.emptyList() : Collections.singletonList(tbl))
+                    .columns(cols)
+                    .build();
+        }
+
+        /* ---------------------- CREATE VIEW ---------------------- */
+
+        @Override
+        public MetadataDto visitStCreateView(MySQLParser.StCreateViewContext x) {
+            MySQLParser.CreateViewStatementContext ctx = x.createViewStatement();
+            String v = normalizeName(qnameText(ctx.viewName));
+            // selectStmt của MySQL.g4 là tolerant (SELECT junk*), khó trích sâu => để rỗng
+            return MetadataDto.builder()
+                    .statementType("CREATE_VIEW")
+                    .schemaName(null)
+                    .objectName(v != null ? nameOnly(v) : null)
+                    .tables(Collections.emptyList())
+                    .columns(Collections.emptyList())
+                    .build();
+        }
+
+        /* ---------------------- CREATE TRIGGER ---------------------- */
+
+        @Override
+        public MetadataDto visitStCreateTrigger(MySQLParser.StCreateTriggerContext x) {
+            MySQLParser.CreateTriggerStatementContext ctx = x.createTriggerStatement();
+            String trg = normalizeName(qnameText(ctx.trigName));
+            String onTbl = normalizeName(qnameText(ctx.tableName));
+            return MetadataDto.builder()
+                    .statementType("CREATE_TRIGGER")
+                    .schemaName(null)
+                    .objectName(trg != null ? nameOnly(trg) : null)
+                    .tables(onTbl == null ? Collections.emptyList() : Collections.singletonList(onTbl))
+                    .columns(Collections.emptyList())
+                    .build();
+        }
+
+        /* ---------------------- CREATE EVENT ---------------------- */
+
+        @Override
+        public MetadataDto visitStCreateEvent(MySQLParser.StCreateEventContext x) {
+            MySQLParser.CreateEventStatementContext ctx = x.createEventStatement();
+            String ev = normalizeName(qnameText(ctx.eventName));
+            return MetadataDto.builder()
+                    .statementType("CREATE_EVENT")
+                    .schemaName(null)
+                    .objectName(ev != null ? nameOnly(ev) : null)
+                    .tables(Collections.emptyList())
+                    .columns(Collections.emptyList())
+                    .build();
+        }
+
+        /* ---------------------- FUNCTION / PROCEDURE ---------------------- */
+
+        @Override
+        public MetadataDto visitStCreateFunction(MySQLParser.StCreateFunctionContext x) {
+            MySQLParser.CreateFunctionStatementContext ctx = x.createFunctionStatement();
+            String fn = normalizeName(qnameText(ctx.funcName));
+            return MetadataDto.builder()
+                    .statementType("CREATE_FUNCTION")
+                    .schemaName(null)
+                    .objectName(fn != null ? nameOnly(fn) : null)
+                    .tables(Collections.emptyList())
+                    .columns(Collections.emptyList())
+                    .build();
+        }
+
+        @Override
+        public MetadataDto visitStCreateProcedure(MySQLParser.StCreateProcedureContext x) {
+            MySQLParser.CreateProcedureStatementContext ctx = x.createProcedureStatement();
+            String pn = normalizeName(qnameText(ctx.procName));
+            return MetadataDto.builder()
+                    .statementType("CREATE_PROCEDURE")
+                    .schemaName(null)
+                    .objectName(pn != null ? nameOnly(pn) : null)
+                    .tables(Collections.emptyList())
+                    .columns(Collections.emptyList())
+                    .build();
+        }
+
+        /* -------- BASIC DML -------- */
+        @Override public MetadataDto visitStSelect(MySQLParser.StSelectContext x)  { return MetadataDto.minimal("SELECT"); }
+        @Override public MetadataDto visitStInsert(MySQLParser.StInsertContext x)  { return MetadataDto.minimal("INSERT"); }
+        @Override public MetadataDto visitStUpdate(MySQLParser.StUpdateContext x)  { return MetadataDto.minimal("UPDATE"); }
+        @Override public MetadataDto visitStDelete(MySQLParser.StDeleteContext x)  { return MetadataDto.minimal("DELETE"); }
+        @Override public MetadataDto visitStSet(MySQLParser.StSetContext x)        { return MetadataDto.minimal("SET"); }
+        @Override public MetadataDto visitStGrant(MySQLParser.StGrantContext x)    { return MetadataDto.minimal("GRANT"); }
+        @Override public MetadataDto visitStRevoke(MySQLParser.StRevokeContext x)  { return MetadataDto.minimal("REVOKE"); }
+        @Override public MetadataDto visitStCreateRole(MySQLParser.StCreateRoleContext x){ return MetadataDto.minimal("CREATE_ROLE"); }
+        @Override public MetadataDto visitStDropRole(MySQLParser.StDropRoleContext x)    { return MetadataDto.minimal("DROP_ROLE"); }
+        @Override public MetadataDto visitStCreateUser(MySQLParser.StCreateUserContext x){ return MetadataDto.minimal("CREATE_USER"); }
+        @Override public MetadataDto visitStDropUser(MySQLParser.StDropUserContext x)    { return MetadataDto.minimal("DROP_USER"); }
+        @Override public MetadataDto visitStCall(MySQLParser.StCallContext x)            { return MetadataDto.minimal("CALL"); }
+
+        /* -------- OTHERS -------- */
+        @Override public MetadataDto visitStUnknown(MySQLParser.StUnknownContext x)      { return MetadataDto.minimal("RAW_STATEMENT"); }
+    }
+
+    private static class SilentErrorListener extends BaseErrorListener {
+        @Override
+        public void syntaxError(Recognizer<?, ?> recognizer, Object offendingSymbol,
+                                int line, int charPositionInLine, String msg, RecognitionException e) {
+            throw new RuntimeException("ANTLR 4 (MySQL) lỗi dòng " + line + ": " + msg);
+        }
     }
 }

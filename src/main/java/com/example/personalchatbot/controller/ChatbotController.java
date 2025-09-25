@@ -5,7 +5,6 @@ import com.example.personalchatbot.dto.AnswerDto;
 import com.example.personalchatbot.dto.MetadataDto;
 import com.example.personalchatbot.service.sql.dto.SqlChunkDto;
 import com.example.personalchatbot.dto.request.MessageRequest;
-import com.example.personalchatbot.service.sql.dialect.service.DialectDetectService;
 import com.example.personalchatbot.service.sql.druid.service.SqlChunkService;
 import com.example.personalchatbot.service.metadata.MetadataService;
 import com.example.personalchatbot.service.rag.RagService;
@@ -26,7 +25,6 @@ import java.util.Map;
 public class ChatbotController {
     private final MetadataService metadataService;
     private final SqlChunkService sqlChunkService;
-    private final DialectDetectService dialectDetectService;
     private final RagService ragService;
     private final LlmConfig llmConfig;
 
@@ -66,13 +64,6 @@ public class ChatbotController {
                 return null;
             }
             else {
-                /*DialectDetectDto dialect = dialectDetectService.detect(sql);
-                if (dialect == null || dialect.getDbType() == null || dialect.getDbType().isEmpty() || dialect.getDbType().equals(String.valueOf(DbType.other))) {
-                    return ResponseEntity.internalServerError().body("Không tìm thấy dialect phù hợp!");
-                }
-                else {
-                    return ResponseEntity.ok().body(sqlChunkService.chunk(sql, dialect.getDbType()).toString());
-                }*/
                 response.setStatus(HttpServletResponse.SC_OK);
                 List<SqlChunkDto> chunks = sqlChunkService.split(sql, dialect);
                 return sqlChunkService.analyzeAndEnrich(chunks, dialect);

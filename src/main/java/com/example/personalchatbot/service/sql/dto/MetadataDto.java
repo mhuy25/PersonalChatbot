@@ -12,8 +12,8 @@ import java.util.List;
 @AllArgsConstructor
 @FieldDefaults(level = AccessLevel.PRIVATE)
 public class MetadataDto {
-    String statementType;      // CREATE_TABLE | CREATE_INDEX | STATEMENT
-    String schemaName;         // grammar hiện tại không có schema -> null
+    String statementType;      // CREATE_TABLE | CREATE_INDEX | STATEMENT | ...
+    String schemaName;
     String objectName;         // tableName / indexName
     List<String> tables;       // với CREATE_INDEX: [tableName]
     List<String> columns;

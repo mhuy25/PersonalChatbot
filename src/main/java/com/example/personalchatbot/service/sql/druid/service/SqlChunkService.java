@@ -18,8 +18,6 @@ import java.util.*;
 /**
  * SqlChunkService
  * - Luồng parse: try Druid -> fail -> try ANTLR -> fail -> try LLM.
- * - Với routine (FUNCTION/PROCEDURE): tách header + chia body theo các khối cấp 1 (BEGIN/IF/CASE/LOOP),
- *   sau đó split thành các câu SQL và gom metadata vào field bodySqlMetaJson; flush theo KHỐI (không nhồi chéo khối).
  */
 @Slf4j
 @Service
@@ -54,16 +52,16 @@ public class SqlChunkService implements SqlChunkServiceImpl {
                             .part(1)
                             .totalParts(1)
                             .dialect(d)
-                            .kind(null)                 // sẽ fill ở bước analyze
+                            .kind(null)
                             .content(p)
                             .build());
                 }
                 if (!chunks.isEmpty()) return chunks;
             } catch (Exception ignore) {
-                // fallback xuống ANTLR
+                // fallback ANTLR
             }
 
-            // 2) fallback ANTLR theo dialect
+            // 2) fallback ANTLR
             AntlrSqlParserImpl antlr = registry.antlrFor(d).orElse(null);
             if (antlr == null) {
                 throw new UnsupportedOperationException("No ANTLR parser for dialect: " + dialect);
@@ -71,7 +69,6 @@ public class SqlChunkService implements SqlChunkServiceImpl {
             try {
                 List<SqlChunkDto> chunks = antlr.split(sql);
                 log.info("Split bằng ANTLR 4");
-                // đảm bảo index liên tục
                 int i = 0;
                 for (SqlChunkDto c : chunks) {
                     c.setIndex(i++);
@@ -79,7 +76,7 @@ public class SqlChunkService implements SqlChunkServiceImpl {
                 }
                 return chunks;
             } catch (Exception e) {
-                // 3) hết fallback cho split
+                // 3) ANTLR Fail
                 throw new RuntimeException("Split failed after Druid & ANTLR: " + e.getMessage(), e);
             }
         }
@@ -96,8 +93,10 @@ public class SqlChunkService implements SqlChunkServiceImpl {
             // 1) Druid
             try {
                 md = druid.analyze(c.getContent(), d);
-                log.info("Lấy metadata bằng Druid cho câu SQL :{}", c.getContent());
-            } catch (Exception ignore) { /* fallback */ }
+                log.info("Lấy metadata bằng Druid cho câu SQL: {}", c.getContent());
+            } catch (Exception ignore) {
+                // fallback ANTLR
+            }
 
             // 2) ANTLR
             if (md == null || isRaw(md)) {
@@ -105,32 +104,33 @@ public class SqlChunkService implements SqlChunkServiceImpl {
                 if (opt.isPresent()) {
                     try {
                         md = opt.get().analyze(c.getContent());
-                        log.info("Lấy metadata bằng ANTLR 4 cho câu SQL :{}", c.getContent());
-                    } catch (Exception ignore) { /* fallback */ }
+                        log.info("Lấy metadata bằng ANTLR 4 cho câu SQL: {}", c.getContent());
+                    } catch (Exception ignore) {
+                        // fallback LLM
+                    }
                 }
             }
 
             // 3) LLM (chỉ metadata – không split)
             if (md == null || isRaw(md)) {
                 try {
-                    // 3) Build prompt từ câu hỏi + context đã chọn
+                    // Build Prompt
                     var prompt = promptService.build(c.getContent(), d);
 
-                    // 4) Gọi LLM sinh câu trả lời
+                    // 4) Call LLM
                     String text = llm.generate(prompt.getSystem(), prompt.getUser());
-                    log.info("Lấy metadata bằng LLM cho câu SQL :{}", c.getContent());
+                    log.info("Lấy metadata bằng LLM cho câu SQL: {}", c.getContent());
                     md = parseLlmMetadata(text);
                 } catch (Exception e) {
-                    // vẫn gán metadata RAW để không chặn cả pipeline
+                    // LLM Fail
                     md = MetadataDto.builder().statementType("RAW_STATEMENT").build();
                 }
             }
 
-            // set kind/object/schema/columns...
             c.setKind(kindFrom(md));
             c.setSchemaName(md.getSchemaName());
             c.setObjectName(md.getObjectName());
-            c.setMetadata(md); // nếu SqlChunkDto có trường metadata; nếu không thì set từng field tương ứng
+            c.setMetadata(md);
         }
         return chunks;
     }
@@ -157,8 +157,6 @@ public class SqlChunkService implements SqlChunkServiceImpl {
             if (llmText == null || llmText.isBlank()) {
                 return MetadataDto.builder().statementType("RAW_STATEMENT").build();
             }
-
-            // 1) Lấy block JSON đầu tiên trong câu trả lời (kể cả khi có ```json ... ```)
             String s = llmText.trim();
             int startHint = -1;
             String lower = s.toLowerCase();
@@ -178,7 +176,6 @@ public class SqlChunkService implements SqlChunkServiceImpl {
             for (int i = startHint; i < s.length(); i++) {
                 char c = s.charAt(i);
                 if (inStr) {
-                    // kết thúc chuỗi khi gặp quote cùng loại và trước đó không phải escape '\'
                     if (c == quote && s.charAt(i - 1) != '\\') inStr = false;
                 } else {
                     if (c == '"' || c == '\'') {
@@ -197,7 +194,7 @@ public class SqlChunkService implements SqlChunkServiceImpl {
 
             String json = s.substring(startHint, end + 1);
 
-            // 2) Map JSON -> holder đơn giản rồi build MetadataDto
+            // Map JSON -> holder đơn giản rồi build MetadataDto
             ObjectMapper om = new ObjectMapper()
                     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
@@ -226,7 +223,7 @@ public class SqlChunkService implements SqlChunkServiceImpl {
                     .build();
 
         } catch (Exception e) {
-            // Bất kỳ lỗi nào -> trả RAW để không chặn pipeline
+            // LLM parse Fail
             return MetadataDto.builder().statementType("RAW_STATEMENT").build();
         }
     }

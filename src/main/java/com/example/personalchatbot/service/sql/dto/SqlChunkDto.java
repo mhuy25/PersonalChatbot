@@ -14,7 +14,7 @@ public class SqlChunkDto {
     private int index;       // vị trí trong toàn bộ script
     private int part;        // dùng khi câu bị chia nhiều phần (body routine)
     private int totalParts;  // tổng số phần
-    private String dialect;  // tên DbType normalize (vd: "mysql", "postgresql")
+    private String dialect;  // tên DbType (vd: "mysql", "postgresql")
     private String kind;     // CREATE_TABLE / CREATE_INDEX / STATEMENT / RAW_STATEMENT ...
     private String schemaName;
     private String objectName;
